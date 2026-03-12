@@ -1,0 +1,67 @@
+{
+  "elements": [
+    {
+      "asset": "main_menu_main_menu_background",
+      "xPercent": -0.0025092400133050374,
+      "yPercent": 0.12236475375801223,
+      "widthPercent": 0.7008916775659293,
+      "heightPercent": 0.4661193691830456,
+      "rotation": 0,
+      "zIndex": 1
+    },
+    {
+      "asset": "main_menu_start_race_button",
+      "xPercent": 0.1792579212294683,
+      "yPercent": 0.4914161810693125,
+      "widthPercent": 0.33906995162718745,
+      "heightPercent": 0.0674128030246754,
+      "rotation": 0,
+      "zIndex": 2
+    },
+    {
+      "asset": "main_menu_game_logo",
+      "xPercent": 0.05690431827986168,
+      "yPercent": 0.07743882947604841,
+      "widthPercent": 0.5751883549393246,
+      "heightPercent": 0.15155231818519493,
+      "rotation": 0,
+      "zIndex": 3
+    },
+    {
+      "asset": "main_menu_settings_icon",
+      "xPercent": 0.046631718212844446,
+      "yPercent": 0.6004272100365559,
+      "widthPercent": 0.15730974188331245,
+      "heightPercent": 0.08462315839841777,
+      "rotation": 0,
+      "zIndex": 4
+    },
+    {
+      "asset": "main_menu_garage_button",
+      "xPercent": 0.7416476337175333,
+      "yPercent": 0.6310086577787221,
+      "widthPercent": 0.3,
+      "heightPercent": 0.12,
+      "rotation": 0,
+      "zIndex": 5
+    },
+    {
+      "asset": "main_menu_garage_button",
+      "xPercent": 0.22863225120435224,
+      "yPercent": 0.6023300452634545,
+      "widthPercent": 0.4664719678028013,
+      "heightPercent": 0.0788863732738377,
+      "rotation": 0,
+      "zIndex": 6
+    },
+    {
+      "asset": "main_menu_currency_display_panel",
+      "xPercent": 0.4120653346441833,
+      "yPercent": 0.01432796591498627,
+      "widthPercent": 0.2830130645099187,
+      "heightPercent": 0.05020244765093263,
+      "rotation": 0,
+      "zIndex": 7
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "elements": [
+    {
+      "asset": "race_hud_race_background",
+      "xPercent": 0.019521143346427215,
+      "yPercent": 0.20937123322607767,
+      "widthPercent": 0.8435819356826146,
+      "heightPercent": 0.590416380215631,
+      "rotation": 0,
+      "zIndex": 1
+    },
+    {
+      "asset": "race_hud_position_indicator",
+      "xPercent": 0.2233931682942734,
+      "yPercent": 0.10038676979702689,
+      "widthPercent": 0.3662490484113188,
+      "heightPercent": 0.06932506473286892,
+      "rotation": 0,
+      "zIndex": 2
+    },
+    {
+      "asset": "race_hud_speedometer_panel",
+      "xPercent": 0.08415094391043461,
+      "yPercent": 0.5019397333946695,
+      "widthPercent": 0.6414374033506428,
+      "heightPercent": 0.2968842080079086,
+      "rotation": 0,
+      "zIndex": 3
+    },
+    {
+      "asset": "race_hud_nitro_button",
+      "xPercent": 0.6464661760531589,
+      "yPercent": 0.42831937153490524,
+      "widthPercent": 0.20827054835355785,
+      "heightPercent": 0.09227220523119178,
+      "rotation": 0,
+      "zIndex": 4
+    }
+  ]
+}

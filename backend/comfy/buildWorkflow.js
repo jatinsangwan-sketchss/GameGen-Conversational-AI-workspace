@@ -1,12 +1,19 @@
-export function buildWorkflow(imagePaths) {
-  if (!Array.isArray(imagePaths) || imagePaths.length === 0) {
-    throw new Error("buildWorkflow: imagePaths must be a non-empty array")
+export function buildWorkflow(imageEntries) {
+  if (!Array.isArray(imageEntries) || imageEntries.length === 0) {
+    throw new Error("buildWorkflow: imageEntries must be a non-empty array")
   }
 
   const prompt = {}
   let nodeId = 1
 
-  imagePaths.forEach((imagePath) => {
+  imageEntries.forEach((entry) => {
+    const inputName = entry?.inputName
+    const outputPrefix = entry?.outputPrefix
+
+    if (!inputName || !outputPrefix) {
+      throw new Error("buildWorkflow: entry must include inputName and outputPrefix")
+    }
+
     const loadId = String(nodeId++)
     const trimId = String(nodeId++)
     const saveId = String(nodeId++)
@@ -14,21 +21,24 @@ export function buildWorkflow(imagePaths) {
     prompt[loadId] = {
       class_type: "LoadImageWithAlpha",
       inputs: {
-        image: imagePath
+        image: inputName
       }
     }
 
     prompt[trimId] = {
       class_type: "TrimTransparentDivisible",
       inputs: {
-        image: [loadId, 0]
+        image: [loadId, 0],
+        alpha_threshold: 0.01,
+        margin: 0
       }
     }
 
     prompt[saveId] = {
       class_type: "SaveImage",
       inputs: {
-        images: [trimId, 0]
+        images: [trimId, 0],
+        filename_prefix: outputPrefix
       }
     }
   })

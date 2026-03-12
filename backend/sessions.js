@@ -1,14 +1,25 @@
-// sessions/store.js
-export const sessions = new Map()
+import { sessionRepository } from "./repositories/SessionRepository.js"
+
+export const sessions = sessionRepository.sessions
 
 export function getSession(sessionId) {
-  if (!sessions.has(sessionId)) {
-    sessions.set(sessionId, { artifacts: [] })
-  }
-  return sessions.get(sessionId)
+  return sessionRepository.get(sessionId)
 }
 
-export function checkSession(sessionId){
-  if(!sessions.has(sessionId))return false;
-  return true;
+export function checkSession(sessionId) {
+  return sessionRepository.has(sessionId)
 }
+
+export function deleteSession(sessionId) {
+  sessionRepository.delete(sessionId)
+}
+
+// /assets/<game_name>/<screen_name>/<png file> ------ this is the folder structure for our assets
+
+// {
+//   designContext: null,
+//   originalPRD: null,
+//   screensMetadata: [],
+//   assets: {},
+//   gameName: null
+// }

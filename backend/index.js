@@ -3,15 +3,22 @@ dotenv.config()
 
 import express from "express"
 import cors from "cors"
-import { callAgent } from "./v2LLM-service.js"
-import { editImageWithMask } from "./llm-service.js"
-import { checkSession, getSession, sessions as sessionStore } from "./sessions.js"
+import path from "path"
+import { callAgent, editImageWithMask } from "./v3LLL-service.js"
+import {
+  checkSession,
+  deleteSession,
+  getSession,
+  sessions as sessionStore
+} from "./sessions.js"
+import { saveLayoutFile } from "./utils/layoutStorage.js"
 
 
 
 const app = express()
 app.use(cors())
 app.use(express.json({ limit: "25mb" }))
+app.use("/assets", express.static(path.join(process.cwd(), "assets")))
 
 console.log("OPENAI_API_KEY loaded:", !!process.env.OPENAI_API_KEY)
 
@@ -29,65 +36,24 @@ app.post("/api/chat", async (req, res) => {
       return res.status(400).json({ error: "Message is required" })
     }
 
-    let artifacts = []
-    if (checkSession(sessionId)) {
-      const session = getSession(sessionId)
-      artifacts = Array.isArray(session.artifacts) ? session.artifacts : []
-    } else {
-      artifacts = getSession(sessionId).artifacts
-    }
-
-    // Backend = agent runtime
+    // Call stateful conversational engine
     const response = await callAgent(message, sessionId)
+    const session = getSession(sessionId)
 
-    /**
-     * Expected response format:
-     * {
-     *   chat: string,
-     *   artifacts: [
-     *     { type: "ui_spec", screen: string, content: object },
-     *     { type: "image", screen: string, content: { url: string } }
-     *   ]
-     * }
-     */
-    if (response?.artifacts?.length) {
-      const session = getSession(sessionId)
-      const stored = Array.isArray(session.artifacts) ? session.artifacts : []
-
-      const withIds = response.artifacts.map((artifact) => {
-        if (artifact.id) return artifact
-
-        const match = stored.find((a) => {
-          if (a.type !== artifact.type) return false
-          if (artifact.screen && a.screen === artifact.screen) return true
-          return false
-        })
-
-        return {
-          ...artifact,
-          id: match?.id || `${artifact.type}_${artifact.screen || "image"}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-        }
-      })
-
-      withIds.forEach((newArtifact) => {
-        const existingIndex = stored.findIndex(
-          (a) => a.id === newArtifact.id || (a.type === newArtifact.type && a.screen === newArtifact.screen)
-        )
-        if (existingIndex >= 0) {
-          stored[existingIndex] = newArtifact
-        } else {
-          stored.push(newArtifact)
-        }
-      })
-
-      session.artifacts = stored
+    // Persist screens/assets from asset-first service
+    if (Array.isArray(response?.screens)) {
+      session.screensMetadata = response.screens
+    }
+    if (response?.assets && typeof response.assets === "object") {
+      session.assets = response.assets
     }
 
-    const session = getSession(sessionId)
-    const allArtifacts = Array.isArray(session.artifacts) ? session.artifacts : []
-    const payload = { ...response, artifacts: allArtifacts }
-    console.log(payload)
-    res.json(payload)
+    res.json({
+      chat: response.chat,
+      screens: session.screensMetadata || [],
+      assets: session.assets || {}
+    })
+
   } catch (error) {
     console.error("Error processing chat:", error)
 
@@ -99,13 +65,14 @@ app.post("/api/chat", async (req, res) => {
   }
 })
 
+
 /**
  * Clear session endpoint
  * Clears UI specs stored in memory
  */
 app.post("/api/chat/clear", (req, res) => {
   const { sessionId = "default" } = req.body
-  sessionStore.delete(sessionId) // Also clear from session store
+  deleteSession(sessionId)
   res.json({ success: true, message: `Session ${sessionId} cleared` })
 })
 
@@ -169,7 +136,38 @@ app.post("/api/image/edit", async (req, res) => {
   }
 })
 
+/**
+ * Layout save endpoint
+ * Persists normalized layout metadata
+ */
+app.post("/api/layout/save", (req, res) => {
+  try {
+    const { gameName, screenName, elements } = req.body || {}
+    if (!gameName || !screenName || !Array.isArray(elements)) {
+      return res.status(400).json({
+        error: "gameName, screenName, and elements are required"
+      })
+    }
+
+    const filePath = saveLayoutFile({ gameName, screenName, elements })
+
+    res.json({
+      success: true,
+      path: filePath
+    })
+  } catch (error) {
+    console.error("Error saving layout:", error)
+    res.status(500).json({
+      error: "Failed to save layout",
+      message: error.message
+    })
+  }
+})
+
 app.listen(3001, () => {
   console.log("Backend running on http://localhost:3001")
   console.log("Architecture: Backend Agent Runtime → OpenAI (text + image)")
 })
+
+
+
