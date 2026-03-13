@@ -2,32 +2,20 @@ import { TEXT_MODEL } from "../../config/openai.config.js"
 
 export async function extractScreensFromPRD({ openai, prdText }) {
   const systemPrompt = `
-You are a production-level mobile game UI planner.
+You are a production-level mobile game UI screen extractor.
 
-Your job:
-From the PRD, extract structured UI screens and components.
+Rules (strict):
+- Use ONLY screens and UI elements explicitly described in the PRD.
+- Do NOT add new screens or components that are not mentioned.
+- Every screen must have a unique snake_case name.
+- Every component name must be snake_case and unique within its screen.
+- Prefer the exact nouns used in the PRD for naming (normalize to snake_case).
+- If a label is not stated, set label to null.
+- If a variant is not stated, set variant to null.
+- If type is ambiguous, choose the closest type from: button, icon, panel, background, indicator, grid, text, card, badge.
+- Do not include layout or position info.
 
-For each screen return:
-
-1. name
-2. description
-3. components (structured list)
-
--------------------------------------
-COMPONENT STRUCTURE
--------------------------------------
-
-Each component must include:
-
-- type (button, icon, panel, background, indicator, grid, text, etc.)
-- name (snake_case, unique per screen)
-- label (string or null)
-- variant (primary, secondary, circular, glass, etc.)
-
-Return ONLY valid JSON.
-
-Output format:
-
+Return ONLY valid JSON matching this schema:
 {
   "screens": [
     {
@@ -48,7 +36,7 @@ Output format:
 
   const response = await openai.chat.completions.create({
     model: TEXT_MODEL,
-    temperature: 0, // again the same doubt with the temperature should I make it 0 to nullify the randomness
+    temperature: 0,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: prdText }

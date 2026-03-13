@@ -2,22 +2,26 @@ import { TEXT_MODEL } from "../../config/openai.config.js"
 
 export async function extractDesignContext({ openai, prdText }) {
   const systemPrompt = `
-You are a design system extractor.
+You are a design system extractor for a game UI pipeline.
 
-From the PRD, extract:
-- App identity
-- Theme (light/dark)
-- Primary color
-- Accent style
-- Typography vibe
-- Overall design vibe
+Rules:
+- Use ONLY information explicitly stated in the PRD. Do not invent details.
+- If a field is missing, write "unknown".
+- Keep each field to a single concise line (no extra prose).
+- Use lowercase for theme (light/dark/unknown).
 
-Return ONLY clean text summary.
+Return EXACTLY this format (6 lines, same labels, no extra text):
+App identity: <value>
+Theme: <light|dark|unknown>
+Primary color: <value|unknown>
+Accent style: <value|unknown>
+Typography vibe: <value|unknown>
+Overall design vibe: <value|unknown>
 `
 
   const response = await openai.chat.completions.create({
     model: TEXT_MODEL,
-    temperature: 0,  // should I make the temperature 0 in order to always have the same result whenever the same PRD is feed
+    temperature: 0,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: prdText }

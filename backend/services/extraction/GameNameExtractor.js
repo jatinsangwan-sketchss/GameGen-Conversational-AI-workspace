@@ -3,8 +3,10 @@ import { TEXT_MODEL } from "../../config/openai.config.js"
 export async function extractGameNameFromPRD({ openai, prdText }) {
   const systemPrompt = `
 Extract the game name from the PRD.
-Return only the name in lowercase snake_case.
-If none found, return "game_ui".
+Rules:
+- Use ONLY the name explicitly stated in the PRD.
+- Return only the name in lowercase snake_case (no extra text).
+- If none found, return "game_ui".
   `
 
   const response = await openai.chat.completions.create({
