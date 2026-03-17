@@ -2,7 +2,8 @@ import { buildAssetUrl } from '../utils/assetUtils'
 
 export default function AssetShelf({
   assets = [],
-  onDragStart
+  onDragStart,
+  disabled = false
 }) {
   if (!assets.length) {
     return (
@@ -32,15 +33,16 @@ export default function AssetShelf({
             <img
               src={url}
               alt={asset.id}
-              draggable
-              onDragStart={(event) => onDragStart?.(asset, event)}
+              draggable={!disabled}
+              onDragStart={(event) => !disabled && onDragStart?.(asset, event)}
               style={{
                 width: '100%',
                 height: '120px',
                 objectFit: 'contain',
                 borderRadius: '6px',
                 backgroundColor: '#1a1a1a',
-                cursor: 'grab'
+                cursor: disabled ? 'not-allowed' : 'grab',
+                opacity: disabled ? 0.65 : 1
               }}
             />
             <div style={{

@@ -1,22 +1,29 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Stage, Layer, Image as KonvaImage, Transformer } from 'react-konva'
+import { Stage, Layer, Image as KonvaImage, Transformer, Rect, Text } from 'react-konva'
 import { buildAssetUrl } from '../utils/assetUtils'
 
-function CanvasAsset({ element, isSelected, onSelect, onChange }) {
+function buildImageUrl(assetPath, cacheKey) {
+  const base = buildAssetUrl(assetPath)
+  if (!cacheKey) return base
+  const separator = base.includes('?') ? '&' : '?'
+  return `${base}${separator}v=${cacheKey}`
+}
+
+function CanvasAsset({ element, isSelected, annotateMode, isEditingAsset, onSelect, onChange }) {
   const shapeRef = useRef(null)
   const [image, setImage] = useState(null)
 
   useEffect(() => {
     let isMounted = true
     const img = new window.Image()
-    img.src = buildAssetUrl(element.assetPath)
+    img.src = buildImageUrl(element.assetPath, element.cacheKey)
     img.onload = () => {
       if (isMounted) setImage(img)
     }
     return () => {
       isMounted = false
     }
-  }, [element.assetPath])
+  }, [element.assetPath, element.cacheKey])
 
   return (
     <KonvaImage
@@ -28,10 +35,11 @@ function CanvasAsset({ element, isSelected, onSelect, onChange }) {
       width={element.width}
       height={element.height}
       rotation={element.rotation || 0}
-      draggable
+      draggable={!annotateMode && !isEditingAsset}
       onClick={onSelect}
       onTap={onSelect}
       onDragEnd={(event) => {
+        if (annotateMode || isEditingAsset) return
         onChange({
           ...element,
           x: event.target.x(),
@@ -39,6 +47,7 @@ function CanvasAsset({ element, isSelected, onSelect, onChange }) {
         })
       }}
       onTransformEnd={(event) => {
+        if (annotateMode || isEditingAsset) return
         const node = event.target
         const scaleX = node.scaleX()
         const scaleY = node.scaleY()
@@ -60,6 +69,8 @@ function CanvasAsset({ element, isSelected, onSelect, onChange }) {
       shadowColor={isSelected ? 'rgba(0,0,0,0.35)' : 'transparent'}
       shadowOffsetX={isSelected ? 2 : 0}
       shadowOffsetY={isSelected ? 2 : 0}
+      stroke={annotateMode && isSelected ? '#60a5fa' : undefined}
+      strokeWidth={annotateMode && isSelected ? 2 : 0}
     />
   )
 }
@@ -69,7 +80,10 @@ export default function LayoutCanvas({
   height,
   elements = [],
   selectedId,
+  annotateMode = false,
+  isEditingAsset = false,
   onSelect,
+  onSelectAsset,
   onChange
 }) {
   const stageRef = useRef(null)
@@ -100,12 +114,20 @@ export default function LayoutCanvas({
       style={{ background: '#111', borderRadius: '24px' }}
       onMouseDown={(event) => {
         if (event.target === event.target.getStage()) {
-          onSelect(null)
+          if (annotateMode) {
+            onSelectAsset?.(null)
+          } else {
+            onSelect(null)
+          }
         }
       }}
       onTouchStart={(event) => {
         if (event.target === event.target.getStage()) {
-          onSelect(null)
+          if (annotateMode) {
+            onSelectAsset?.(null)
+          } else {
+            onSelect(null)
+          }
         }
       }}
     >
@@ -115,15 +137,49 @@ export default function LayoutCanvas({
             key={element.id}
             element={element}
             isSelected={element.id === selectedId}
-            onSelect={() => onSelect(element.id)}
+            annotateMode={annotateMode}
+            isEditingAsset={isEditingAsset}
+            onSelect={() => {
+              if (annotateMode) {
+                onSelectAsset?.(element)
+              } else {
+                onSelect(element.id)
+              }
+            }}
             onChange={(next) => onChange(next)}
           />
         ))}
+        {annotateMode && isEditingAsset && selectedId && (() => {
+          const selected = elements.find((el) => el.id === selectedId)
+          if (!selected) return null
+          return (
+            <>
+              <Rect
+                x={selected.x}
+                y={selected.y}
+                width={selected.width}
+                height={selected.height}
+                fill="rgba(0,0,0,0.45)"
+                cornerRadius={6}
+              />
+              <Text
+                x={selected.x}
+                y={selected.y + selected.height / 2 - 8}
+                width={selected.width}
+                text="Editing..."
+                fontSize={12}
+                fill="#ffffff"
+                align="center"
+              />
+            </>
+          )
+        })()}
         <Transformer
           ref={transformerRef}
-          rotateEnabled
+          visible={!annotateMode}
+          rotateEnabled={!annotateMode}
           keepRatio={false}
-          enabledAnchors={[
+          enabledAnchors={annotateMode ? [] : [
             'top-left',
             'top-center',
             'top-right',

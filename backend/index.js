@@ -4,7 +4,8 @@ dotenv.config()
 import express from "express"
 import cors from "cors"
 import path from "path"
-import { callAgent, editImageWithMask } from "./v3LLL-service.js"
+import OpenAI from "openai"
+import { callAgent } from "./v3LLL-service.js"
 import {
   checkSession,
   deleteSession,
@@ -12,6 +13,7 @@ import {
   sessions as sessionStore
 } from "./sessions.js"
 import { saveLayoutFile } from "./utils/layoutStorage.js"
+import { editAsset } from "./services/editAssetService.js"
 
 
 
@@ -21,6 +23,10 @@ app.use(express.json({ limit: "25mb" }))
 app.use("/assets", express.static(path.join(process.cwd(), "assets")))
 
 console.log("OPENAI_API_KEY loaded:", !!process.env.OPENAI_API_KEY)
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+})
 
 /**
  * Session tracking (lightweight)
@@ -51,7 +57,8 @@ app.post("/api/chat", async (req, res) => {
     res.json({
       chat: response.chat,
       screens: session.screensMetadata || [],
-      assets: session.assets || {}
+      assets: session.assets || {},
+      designContext: session.designContext || null
     })
 
   } catch (error) {
@@ -77,60 +84,32 @@ app.post("/api/chat/clear", (req, res) => {
 })
 
 /**
- * Image editing endpoint with mask
- * Accepts image source (URL or data URL), mask, and prompt
+ * Annotate asset edit endpoint (single-asset only)
  */
-app.post("/api/image/edit", async (req, res) => {
+app.post("/api/edit-asset", async (req, res) => {
   try {
-    const { imageSource, maskDataURL, prompt, artifactId, sessionId = "default" } = req.body
-
-    if (!imageSource || !maskDataURL) {
+    const { assetPath, instruction, designContext } = req.body || {}
+    if (!assetPath || !instruction || !designContext) {
       return res.status(400).json({
-        error: "imageSource and maskDataURL are required"
+        error: "assetPath, instruction, and designContext are required"
       })
     }
 
-    const imageUrl = await editImageWithMask(
-      imageSource,
-      maskDataURL,
-      prompt || "Edit the masked area to improve the design"
-    )
-
-    const session = getSession(sessionId)
-    const stored = Array.isArray(session.artifacts) ? session.artifacts : []
-    let updatedArtifact = null
-
-    if (artifactId) {
-      const idx = stored.findIndex((a) => a.id === artifactId)
-      if (idx >= 0) {
-        stored[idx] = {
-          ...stored[idx],
-          content: { url: imageUrl }
-        }
-        updatedArtifact = stored[idx]
-      }
-    }
-
-    if (!updatedArtifact) {
-      updatedArtifact = {
-        id: artifactId || `image_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        type: "image",
-        content: { url: imageUrl }
-      }
-      stored.push(updatedArtifact)
-    }
-
-    session.artifacts = stored
+    const updatedPath = await editAsset({
+      openai,
+      assetPath,
+      instruction,
+      designContext
+    })
 
     res.json({
       success: true,
-      artifact: updatedArtifact,
-      artifacts: stored
+      assetPath: updatedPath
     })
   } catch (error) {
-    console.error("Error editing image:", error)
+    console.error("Error editing asset:", error)
     res.status(500).json({
-      error: "Failed to edit image",
+      error: "Failed to edit asset",
       message: error.message
     })
   }

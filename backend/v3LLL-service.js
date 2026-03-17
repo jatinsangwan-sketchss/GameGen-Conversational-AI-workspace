@@ -1,6 +1,5 @@
 import OpenAI from "openai"
 import dotenv from "dotenv"
-import { File } from "node:buffer"
 import { getSession } from "./sessions.js"
 import { runBatchTrim } from "./services/comfy/ComfyOrchestrator.js"
 import { generateAssetsForSession } from "./services/generation/AssetGenerator.js"
@@ -222,70 +221,4 @@ export async function callAgent(message, sessionId) {
 }
 
 
-/* -------------------------------------------
-   IMAGE EDITING WITH MASK
--------------------------------------------- */
-
-export async function editImageWithMask(imageSource, maskDataURL, prompt) {
-  const editPrompt = `
-Modify ONLY the masked area.
-${prompt || "Edit the masked area to improve the design"}
-Preserve the rest of the image exactly.
-`
-
-  const maskBase64 = maskDataURL.includes(",") ? maskDataURL.split(",")[1] : maskDataURL
-  const maskBuffer = Buffer.from(maskBase64, "base64")
-  const maskFile = new File([maskBuffer], "mask.png", { type: "image/png" })
-
-  let imageBuffer
-  let imageType = "image/png"
-  let imageName = "image.png"
-
-  if (imageSource.startsWith("data:")) {
-    const match = imageSource.match(/^data:(.*?);base64,/)
-    if (match?.[1]) {
-      imageType = match[1]
-    }
-    const imageBase64 = imageSource.split(",")[1]
-    imageBuffer = Buffer.from(imageBase64, "base64")
-  } else {
-    const imageRes = await fetch(imageSource)
-    if (!imageRes.ok) {
-      throw new Error(`Failed to fetch image: ${imageRes.status}`)
-    }
-    const contentType = imageRes.headers.get("content-type")
-    if (contentType) {
-      imageType = contentType.split(";")[0].trim()
-    }
-    const arrayBuffer = await imageRes.arrayBuffer()
-    imageBuffer = Buffer.from(arrayBuffer)
-  }
-
-  if (imageType === "image/jpg") {
-    imageType = "image/jpeg"
-  }
-  if (imageType === "image/webp") {
-    imageName = "image.webp"
-  } else if (imageType === "image/jpeg") {
-    imageName = "image.jpg"
-  }
-
-  const imageFile = new File([imageBuffer], imageName, { type: imageType })
-
-  const result = await openai.images.edit({
-    model: IMAGE_MODEL,
-    image: imageFile,
-    mask: maskFile,
-    prompt: editPrompt,
-    n: 1,
-    size: "1024x1536"
-  })
-
-  const image = result.data?.[0]
-  if (!image) throw new Error("No edited image returned")
-
-  if (image.url) return image.url
-  if (image.b64_json) return `data:image/png;base64,${image.b64_json}`
-
-  throw new Error("Invalid edited image response")
-}
+// editImageWithMask removed (deprecated)

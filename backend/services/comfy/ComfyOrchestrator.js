@@ -31,6 +31,21 @@ function copyToComfyInput(imageEntries) {
   })
 }
 
+function clearComfyOutput() {
+  if (!fs.existsSync(COMFY_OUTPUT_DIR)) return
+  fs.readdirSync(COMFY_OUTPUT_DIR).forEach((file) => {
+    const fullPath = path.join(COMFY_OUTPUT_DIR, file)
+    try {
+      const stats = fs.statSync(fullPath)
+      if (stats.isFile()) {
+        fs.unlinkSync(fullPath)
+      }
+    } catch (err) {
+      console.warn(`[comfy] Failed to clean output entry: ${fullPath}`, err)
+    }
+  })
+}
+
 function collectAssetPaths(session) {
   const assetsByScreen = session?.assets || {}
   const items = []
@@ -138,4 +153,42 @@ export async function runBatchTrim(session) {
   console.log(`[comfy] Replaced ${replaced} assets, missing ${missing}`)
 
   console.log("[comfy] Production trim complete")
+}
+
+export async function runComfyTrimSingle(assetPath) {
+  if (!assetPath) return
+  const absolutePath = path.isAbsolute(assetPath)
+    ? assetPath
+    : path.join(process.cwd(), assetPath)
+
+  if (!fs.existsSync(absolutePath)) {
+    throw new Error(`[comfy] Asset not found: ${absolutePath}`)
+  }
+
+  const base = normalizeName(path.basename(absolutePath))
+  const outputPrefix = `single_${base}`
+  const entries = [
+    {
+      inputName: `${outputPrefix}.png`,
+      outputPrefix,
+      originalPath: absolutePath
+    }
+  ]
+
+  console.log("[comfy] Preparing single asset trim")
+  copyToComfyInput(entries)
+  clearComfyOutput()
+
+  const workflow = buildComfyWorkflow({ entries })
+  const promptId = await queueWorkflow({ workflow })
+  console.log(`[comfy] Prompt queued: ${promptId}`)
+
+  await waitForCompletion({ promptId })
+  console.log("[comfy] Workflow completed")
+
+  const { replaced, missing } = replaceTrimmedAssets(entries)
+  console.log(`[comfy] Replaced ${replaced} asset, missing ${missing}`)
+
+  clearComfyOutput()
+  console.log("[comfy] Single trim complete")
 }

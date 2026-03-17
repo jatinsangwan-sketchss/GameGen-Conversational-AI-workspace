@@ -177,6 +177,7 @@ export default function App() {
   const [screens, setScreens] = useState([])
   const [assets, setAssets] = useState({})
   const [layoutByScreen, setLayoutByScreen] = useState({})
+  const [designContext, setDesignContext] = useState(null)
   const [saveNotice, setSaveNotice] = useState('')
   const saveNoticeTimer = useRef(null)
   const [input, setInput] = useState('')
@@ -227,6 +228,9 @@ export default function App() {
       if (data.assets && typeof data.assets === 'object') {
         setAssets(data.assets)
       }
+      if (typeof data.designContext === 'string') {
+        setDesignContext(data.designContext)
+      }
     } catch (error) {
       console.error('Error sending message:', error)
       setMessages(m => [...m, { 
@@ -249,6 +253,7 @@ export default function App() {
     setMessages([])
     setScreens([])
     setAssets({})
+    setDesignContext(null)
     setLayoutByScreen({})
     fetch(`${API_BASE_URL}/api/chat/clear`, {
       method: 'POST',
@@ -579,6 +584,7 @@ export default function App() {
               layoutByScreen={layoutByScreen}
               setLayoutByScreen={setLayoutByScreen}
               onSaved={handleLayoutSaved}
+              designContext={designContext}
             />
           )}
         </div>

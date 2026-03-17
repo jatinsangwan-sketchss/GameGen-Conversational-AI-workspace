@@ -2,6 +2,7 @@ import { useMemo, useRef, useState, useEffect } from 'react'
 import AssetShelf from './AssetShelf'
 import LayoutCanvas from './LayoutCanvas'
 import { saveLayout } from '../api/layoutApi'
+import { editAsset as editAssetApi } from '../api/editAssetApi'
 
 const layoutColors = {
   panel: '#111111',
@@ -22,12 +23,18 @@ export default function LayoutWorkspace({
   assets = {},
   layoutByScreen,
   setLayoutByScreen,
-  onSaved
+  onSaved,
+  designContext
 }) {
   const containerRef = useRef(null)
   const [canvasSize, setCanvasSize] = useState({ width: 375, height: 666 })
   const [selectedId, setSelectedId] = useState(null)
   const [draggedAsset, setDraggedAsset] = useState(null)
+  const [annotateMode, setAnnotateMode] = useState(false)
+  const [selectedAsset, setSelectedAsset] = useState(null)
+  const [annotationText, setAnnotationText] = useState('')
+  const [isEditingAsset, setIsEditingAsset] = useState(false)
+  const [annotateNotice, setAnnotateNotice] = useState('')
   const [selectedScreenName, setSelectedScreenName] = useState(
     screens?.[0]?.name || ''
   )
@@ -37,6 +44,14 @@ export default function LayoutWorkspace({
       setSelectedScreenName(screens[0].name)
     }
   }, [screens, selectedScreenName])
+
+  useEffect(() => {
+    if (!annotateMode) {
+      setSelectedAsset(null)
+      setAnnotationText('')
+      setAnnotateNotice('')
+    }
+  }, [annotateMode])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -54,8 +69,12 @@ export default function LayoutWorkspace({
   }, [assets, selectedScreenName])
 
   const elements = layoutByScreen?.[selectedScreenName]?.elements || []
+  const selectedElement = selectedAsset
+    ? elements.find((el) => el.id === selectedAsset.elementId)
+    : null
 
   function handleDragStart(asset, event) {
+    if (annotateMode || isEditingAsset) return
     setDraggedAsset(asset)
     if (event?.dataTransfer) {
       event.dataTransfer.setData('application/json', JSON.stringify(asset))
@@ -63,6 +82,7 @@ export default function LayoutWorkspace({
   }
 
   function handleDrop(event) {
+    if (annotateMode || isEditingAsset) return
     event.preventDefault()
     const rect = containerRef.current?.getBoundingClientRect()
     if (!rect) return
@@ -108,6 +128,7 @@ export default function LayoutWorkspace({
   }
 
   function handleElementChange(updated) {
+    if (annotateMode || isEditingAsset) return
     const next = elements.map((el) => (el.id === updated.id ? updated : el))
     setLayoutByScreen?.((prev) => ({
       ...prev,
@@ -136,6 +157,63 @@ export default function LayoutWorkspace({
     }
     await saveLayout(payload)
     onSaved?.('Screen layout saved')
+  }
+
+  function handleSelectAsset(element) {
+    if (!annotateMode) return
+    if (isEditingAsset) return
+    if (!element) {
+      setSelectedAsset(null)
+      return
+    }
+    if (selectedAsset && selectedAsset.elementId !== element.id) {
+      setAnnotateNotice('Finish the current annotation before selecting another asset.')
+      setTimeout(() => setAnnotateNotice(''), 2000)
+      return
+    }
+    const assetInfo = screenAssets.find((asset) => asset.id === element.assetId)
+    setSelectedAsset({
+      elementId: element.id,
+      assetId: element.assetId,
+      assetPath: element.assetPath,
+      fileName: assetInfo?.fileName || null
+    })
+  }
+
+  async function handleSubmitAnnotation() {
+    if (!selectedAsset || !annotationText.trim()) return
+    setIsEditingAsset(true)
+    try {
+      const gameName = deriveGameNameFromAssets(assets, selectedScreenName)
+      await editAssetApi({
+        assetPath: selectedAsset.assetPath,
+        instruction: annotationText.trim(),
+        designContext: designContext || 'unknown',
+        gameName,
+        screenName: selectedScreenName
+      })
+
+      const updatedElements = elements.map((el) => {
+        if (el.id !== selectedAsset.elementId) return el
+        return {
+          ...el,
+          cacheKey: Date.now()
+        }
+      })
+      setLayoutByScreen?.((prev) => ({
+        ...prev,
+        [selectedScreenName]: {
+          screenName: selectedScreenName,
+          elements: updatedElements
+        }
+      }))
+      setSelectedAsset(null)
+      setAnnotationText('')
+      setAnnotateMode(false)
+      onSaved?.('Asset updated')
+    } finally {
+      setIsEditingAsset(false)
+    }
   }
 
   return (
@@ -171,29 +249,58 @@ export default function LayoutWorkspace({
             ))}
           </select>
         </div>
-        <AssetShelf assets={screenAssets} onDragStart={handleDragStart} />
+        <AssetShelf
+          assets={screenAssets}
+          onDragStart={handleDragStart}
+          disabled={annotateMode || isEditingAsset}
+        />
       </div>
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '12px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ color: layoutColors.textMuted, fontSize: '12px' }}>
-            Drag assets into the canvas and resize as needed
+            {annotateMode
+              ? 'Annotate mode: click an asset to edit its visual style'
+              : 'Drag assets into the canvas and resize as needed'}
           </div>
-          <button
-            onClick={handleSave}
-            style={{
-              padding: '10px 16px',
-              borderRadius: '8px',
-              border: 'none',
-              background: '#3b82f6',
-              color: '#fff',
-              fontWeight: 600,
-              cursor: 'pointer'
-            }}
-          >
-            Save Screen
-          </button>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button
+              onClick={() => setAnnotateMode((prev) => !prev)}
+              disabled={isEditingAsset}
+              style={{
+                padding: '10px 16px',
+                borderRadius: '8px',
+                border: `1px solid ${layoutColors.border}`,
+                background: annotateMode ? '#1f2937' : '#0f172a',
+                color: '#fff',
+                fontWeight: 600,
+                cursor: isEditingAsset ? 'not-allowed' : 'pointer'
+              }}
+            >
+              Annotate
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={annotateMode || isEditingAsset}
+              style={{
+                padding: '10px 16px',
+                borderRadius: '8px',
+                border: 'none',
+                background: annotateMode || isEditingAsset ? '#475569' : '#3b82f6',
+                color: '#fff',
+                fontWeight: 600,
+                cursor: annotateMode || isEditingAsset ? 'not-allowed' : 'pointer'
+              }}
+            >
+              Save Screen
+            </button>
+          </div>
         </div>
+        {annotateNotice && (
+          <div style={{ color: '#fbbf24', fontSize: '12px' }}>
+            {annotateNotice}
+          </div>
+        )}
 
         <div
           ref={containerRef}
@@ -213,16 +320,74 @@ export default function LayoutWorkspace({
             borderRadius: '24px',
             overflow: 'hidden',
             border: `1px solid ${layoutColors.border}`,
-            background: '#0f0f0f'
+            background: '#0f0f0f',
+            position: 'relative'
           }}>
             <LayoutCanvas
               width={canvasSize.width}
               height={canvasSize.height}
               elements={elements}
-              selectedId={selectedId}
+              selectedId={annotateMode ? selectedAsset?.elementId : selectedId}
+              annotateMode={annotateMode}
+              isEditingAsset={isEditingAsset}
               onSelect={setSelectedId}
+              onSelectAsset={handleSelectAsset}
               onChange={handleElementChange}
             />
+            {annotateMode && selectedElement && !isEditingAsset && (
+              <div style={{
+                position: 'absolute',
+                left: Math.min(
+                  Math.max(selectedElement.x + 16, 8),
+                  canvasSize.width - 260
+                ),
+                top: Math.min(
+                  Math.max(selectedElement.y + 16, 8),
+                  canvasSize.height - 140
+                ),
+                width: '240px',
+                background: '#111827',
+                border: `1px solid ${layoutColors.border}`,
+                borderRadius: '10px',
+                padding: '10px',
+                color: '#e5e7eb'
+              }}>
+                <div style={{ fontSize: '12px', marginBottom: '6px' }}>
+                  Edit {selectedAsset?.fileName || selectedAsset?.assetId}
+                </div>
+                <textarea
+                  value={annotationText}
+                  onChange={(e) => setAnnotationText(e.target.value)}
+                  rows={3}
+                  style={{
+                    width: '100%',
+                    resize: 'none',
+                    background: '#0f172a',
+                    color: '#e5e7eb',
+                    border: `1px solid ${layoutColors.border}`,
+                    borderRadius: '6px',
+                    padding: '6px'
+                  }}
+                />
+                <button
+                  onClick={handleSubmitAnnotation}
+                  disabled={!annotationText.trim()}
+                  style={{
+                    marginTop: '8px',
+                    width: '100%',
+                    padding: '8px 10px',
+                    borderRadius: '6px',
+                    border: 'none',
+                    background: '#3b82f6',
+                    color: '#fff',
+                    fontWeight: 600,
+                    cursor: !annotationText.trim() ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  Apply Edit
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
