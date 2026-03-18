@@ -151,11 +151,14 @@ export async function callAgent(message, sessionId) {
     session.originalPRD = safeMessage
     session.screensMetadata = screensWithImages
     session.gameName = gameName
+    session.lastExtractionAt = new Date().toISOString()
 
     console.log("this is the design context::::", designContext)
     console.log("extractScreensFromPRD:::::", screensWithImages)
     console.log("GameName:::::", gameName)
+    console.log("[session] lastExtractionAt:", session.lastExtractionAt)
 
+    // I can call an LLM to provide a human like repsonse stream = true
     // Asset-first generationx
     const { assets, screens: screensWithImagesAndAssets } =
       await generateAssetsForSession({ openai, session, runComfyBatchTrim: runBatchTrim })
@@ -175,6 +178,7 @@ export async function callAgent(message, sessionId) {
     })
 
     session.designContext = updatedContext
+    session.lastExtractionAt = new Date().toISOString()
 
     const screensWithImages = await generateScreenImages({
       openai,
@@ -203,6 +207,7 @@ export async function callAgent(message, sessionId) {
       gameName: session.gameName || "game_ui"
     })
     session.screensMetadata = screensWithImages
+    session.lastExtractionAt = new Date().toISOString()
 
     const { assets, screens: screensWithImagesAndAssets } =
       await generateAssetsForSession({ openai, session, runComfyBatchTrim: runBatchTrim })

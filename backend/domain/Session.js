@@ -4,6 +4,8 @@ export function createSession() {
     originalPRD: null,
     screensMetadata: [],
     assets: {},
-    gameName: null
+    gameName: null,
+    lastExtractionAt: null,
+    lastAssetGenerationAt: null
   }
 }

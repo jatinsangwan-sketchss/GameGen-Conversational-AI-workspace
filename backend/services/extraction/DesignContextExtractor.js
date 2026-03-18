@@ -1,6 +1,7 @@
 import { TEXT_MODEL } from "../../config/openai.config.js"
 
 export async function extractDesignContext({ openai, prdText }) {
+  // Deterministic, fielded design context to reduce guessing
   const systemPrompt = `
 You are a design system extractor for a game UI pipeline.
 

@@ -14,7 +14,7 @@ STRICT RULES:
 - Preserve layout
 - Do not resize element
 - Do not add new UI elements
-- Maintain transparent background
+- background should be transparent
 - Only apply the requested visual modification
 
 Design System:

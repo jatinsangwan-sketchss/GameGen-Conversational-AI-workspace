@@ -3,7 +3,8 @@ import { buildAssetUrl } from '../utils/assetUtils'
 export default function AssetShelf({
   assets = [],
   onDragStart,
-  disabled = false
+  disabled = false,
+  refreshToken
 }) {
   if (!assets.length) {
     return (
@@ -16,7 +17,7 @@ export default function AssetShelf({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
       {assets.map((asset) => {
-        const url = buildAssetUrl(asset.path)
+        const url = buildAssetUrl(asset.path) + (refreshToken ? `?v=${refreshToken}` : '')
         return (
           <div
             key={asset.id}

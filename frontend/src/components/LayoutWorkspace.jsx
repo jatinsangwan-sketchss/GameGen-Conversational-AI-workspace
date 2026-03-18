@@ -24,7 +24,10 @@ export default function LayoutWorkspace({
   layoutByScreen,
   setLayoutByScreen,
   onSaved,
-  designContext
+  designContext,
+  onAnnotationLog,
+  assetRefreshByScreen,
+  setAssetRefreshByScreen
 }) {
   const containerRef = useRef(null)
   const [canvasSize, setCanvasSize] = useState({ width: 375, height: 666 })
@@ -35,6 +38,8 @@ export default function LayoutWorkspace({
   const [annotationText, setAnnotationText] = useState('')
   const [isEditingAsset, setIsEditingAsset] = useState(false)
   const [annotateNotice, setAnnotateNotice] = useState('')
+  const [overlayPosition, setOverlayPosition] = useState({ left: 0, top: 0 })
+  const canvasFrameRef = useRef(null)
   const [selectedScreenName, setSelectedScreenName] = useState(
     screens?.[0]?.name || ''
   )
@@ -72,6 +77,25 @@ export default function LayoutWorkspace({
   const selectedElement = selectedAsset
     ? elements.find((el) => el.id === selectedAsset.elementId)
     : null
+
+  useEffect(() => {
+    if (!selectedElement || !canvasFrameRef.current || !containerRef.current) return
+    const frameRect = canvasFrameRef.current.getBoundingClientRect()
+    const parentRect = containerRef.current.getBoundingClientRect()
+
+    const baseLeft = frameRect.left - parentRect.left + selectedElement.x + 16
+    const baseTop = frameRect.top - parentRect.top + selectedElement.y + 16
+
+    const popupWidth = 260
+    const popupHeight = 160
+    const maxLeft = parentRect.width - popupWidth - 12
+    const maxTop = parentRect.height - popupHeight - 12
+
+    setOverlayPosition({
+      left: Math.min(Math.max(baseLeft, 12), Math.max(maxLeft, 12)),
+      top: Math.min(Math.max(baseTop, 12), Math.max(maxTop, 12))
+    })
+  }, [selectedElement, canvasSize.width, canvasSize.height])
 
   function handleDragStart(asset, event) {
     if (annotateMode || isEditingAsset) return
@@ -184,6 +208,10 @@ export default function LayoutWorkspace({
     if (!selectedAsset || !annotationText.trim()) return
     setIsEditingAsset(true)
     try {
+      onAnnotationLog?.({
+        assetName: selectedAsset.fileName || selectedAsset.assetId,
+        instruction: annotationText.trim()
+      })
       const gameName = deriveGameNameFromAssets(assets, selectedScreenName)
       await editAssetApi({
         assetPath: selectedAsset.assetPath,
@@ -192,6 +220,11 @@ export default function LayoutWorkspace({
         gameName,
         screenName: selectedScreenName
       })
+
+      setAssetRefreshByScreen?.((prev) => ({
+        ...prev,
+        [selectedScreenName]: Date.now()
+      }))
 
       const updatedElements = elements.map((el) => {
         if (el.id !== selectedAsset.elementId) return el
@@ -253,6 +286,7 @@ export default function LayoutWorkspace({
           assets={screenAssets}
           onDragStart={handleDragStart}
           disabled={annotateMode || isEditingAsset}
+          refreshToken={assetRefreshByScreen?.[selectedScreenName]}
         />
       </div>
 
@@ -310,7 +344,8 @@ export default function LayoutWorkspace({
             flex: 1,
             display: 'flex',
             justifyContent: 'center',
-            alignItems: 'flex-start'
+            alignItems: 'flex-start',
+            position: 'relative'
           }}
         >
           <div style={{
@@ -322,7 +357,9 @@ export default function LayoutWorkspace({
             border: `1px solid ${layoutColors.border}`,
             background: '#0f0f0f',
             position: 'relative'
-          }}>
+          }}
+          ref={canvasFrameRef}
+          >
             <LayoutCanvas
               width={canvasSize.width}
               height={canvasSize.height}
@@ -334,61 +371,63 @@ export default function LayoutWorkspace({
               onSelectAsset={handleSelectAsset}
               onChange={handleElementChange}
             />
-            {annotateMode && selectedElement && !isEditingAsset && (
-              <div style={{
-                position: 'absolute',
-                left: Math.min(
-                  Math.max(selectedElement.x + 16, 8),
-                  canvasSize.width - 260
-                ),
-                top: Math.min(
-                  Math.max(selectedElement.y + 16, 8),
-                  canvasSize.height - 140
-                ),
-                width: '240px',
-                background: '#111827',
-                border: `1px solid ${layoutColors.border}`,
-                borderRadius: '10px',
-                padding: '10px',
-                color: '#e5e7eb'
-              }}>
-                <div style={{ fontSize: '12px', marginBottom: '6px' }}>
-                  Edit {selectedAsset?.fileName || selectedAsset?.assetId}
-                </div>
-                <textarea
-                  value={annotationText}
-                  onChange={(e) => setAnnotationText(e.target.value)}
-                  rows={3}
-                  style={{
-                    width: '100%',
-                    resize: 'none',
-                    background: '#0f172a',
-                    color: '#e5e7eb',
-                    border: `1px solid ${layoutColors.border}`,
-                    borderRadius: '6px',
-                    padding: '6px'
-                  }}
-                />
-                <button
-                  onClick={handleSubmitAnnotation}
-                  disabled={!annotationText.trim()}
-                  style={{
-                    marginTop: '8px',
-                    width: '100%',
-                    padding: '8px 10px',
-                    borderRadius: '6px',
-                    border: 'none',
-                    background: '#3b82f6',
-                    color: '#fff',
-                    fontWeight: 600,
-                    cursor: !annotationText.trim() ? 'not-allowed' : 'pointer'
-                  }}
-                >
-                  Apply Edit
-                </button>
-              </div>
-            )}
           </div>
+          {annotateMode && selectedElement && !isEditingAsset && (
+            <div style={{
+              position: 'absolute',
+              left: overlayPosition.left,
+              top: overlayPosition.top,
+              width: '260px',
+              background: 'linear-gradient(180deg, rgba(20,27,44,0.98) 0%, rgba(12,18,32,0.98) 100%)',
+              border: '1px solid rgba(59,130,246,0.35)',
+              borderRadius: '12px',
+              padding: '12px',
+              color: '#e5e7eb',
+              boxShadow: '0 10px 30px rgba(0,0,0,0.45)',
+              zIndex: 20
+            }}>
+              <div style={{
+                fontSize: '12px',
+                marginBottom: '8px',
+                color: '#cbd5f5',
+                letterSpacing: '0.3px'
+              }}>
+                Edit {selectedAsset?.fileName || selectedAsset?.assetId}
+              </div>
+              <textarea
+                value={annotationText}
+                onChange={(e) => setAnnotationText(e.target.value)}
+                rows={3}
+                style={{
+                  width: '100%',
+                  resize: 'none',
+                  background: '#0b1220',
+                  color: '#e5e7eb',
+                  border: '1px solid rgba(148,163,184,0.25)',
+                  borderRadius: '8px',
+                  padding: '8px',
+                  outline: 'none'
+                }}
+              />
+              <button
+                onClick={handleSubmitAnnotation}
+                disabled={!annotationText.trim()}
+                style={{
+                  marginTop: '10px',
+                  width: '100%',
+                  padding: '9px 12px',
+                  borderRadius: '8px',
+                  border: 'none',
+                  background: annotationText.trim() ? '#3b82f6' : '#475569',
+                  color: '#fff',
+                  fontWeight: 600,
+                  cursor: !annotationText.trim() ? 'not-allowed' : 'pointer'
+                }}
+              >
+                Apply Edit
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>
