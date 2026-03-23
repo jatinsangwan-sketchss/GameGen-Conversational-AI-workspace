@@ -17,7 +17,7 @@ export default function AssetShelf({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
       {assets.map((asset) => {
-        const url = buildAssetUrl(asset.path) + (refreshToken ? `?v=${refreshToken}` : '')
+        const url = buildAssetUrl(asset.path)
         return (
           <div
             key={asset.id}

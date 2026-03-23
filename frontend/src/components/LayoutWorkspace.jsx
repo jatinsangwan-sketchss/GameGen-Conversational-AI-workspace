@@ -25,9 +25,7 @@ export default function LayoutWorkspace({
   setLayoutByScreen,
   onSaved,
   designContext,
-  onAnnotationLog,
-  assetRefreshByScreen,
-  setAssetRefreshByScreen
+  onAnnotationLog
 }) {
   const containerRef = useRef(null)
   const [canvasSize, setCanvasSize] = useState({ width: 375, height: 666 })
@@ -57,6 +55,7 @@ export default function LayoutWorkspace({
       setAnnotateNotice('')
     }
   }, [annotateMode])
+
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -163,6 +162,7 @@ export default function LayoutWorkspace({
     }))
   }
 
+
   async function handleSave() {
     if (!selectedScreenName) return
     const gameName = deriveGameNameFromAssets(assets, selectedScreenName)
@@ -220,11 +220,6 @@ export default function LayoutWorkspace({
         gameName,
         screenName: selectedScreenName
       })
-
-      setAssetRefreshByScreen?.((prev) => ({
-        ...prev,
-        [selectedScreenName]: Date.now()
-      }))
 
       const updatedElements = elements.map((el) => {
         if (el.id !== selectedAsset.elementId) return el
@@ -286,7 +281,6 @@ export default function LayoutWorkspace({
           assets={screenAssets}
           onDragStart={handleDragStart}
           disabled={annotateMode || isEditingAsset}
-          refreshToken={assetRefreshByScreen?.[selectedScreenName]}
         />
       </div>
 

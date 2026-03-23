@@ -178,7 +178,6 @@ export default function App() {
   const [assets, setAssets] = useState({})
   const [layoutByScreen, setLayoutByScreen] = useState({})
   const [designContext, setDesignContext] = useState(null)
-  const [assetRefreshByScreen, setAssetRefreshByScreen] = useState({})
   const [saveNotice, setSaveNotice] = useState('')
   const saveNoticeTimer = useRef(null)
   const [input, setInput] = useState('')
@@ -261,7 +260,6 @@ export default function App() {
     setAssets({})
     setDesignContext(null)
     setLayoutByScreen({})
-    setAssetRefreshByScreen({})
     fetch(`${API_BASE_URL}/api/chat/clear`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -593,8 +591,6 @@ export default function App() {
               onSaved={handleLayoutSaved}
               designContext={designContext}
               onAnnotationLog={handleAnnotationLog}
-              assetRefreshByScreen={assetRefreshByScreen}
-              setAssetRefreshByScreen={setAssetRefreshByScreen}
             />
           )}
         </div>
