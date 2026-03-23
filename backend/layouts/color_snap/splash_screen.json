@@ -1,0 +1,31 @@
+{
+  "elements": [
+    {
+      "asset": "splash_screen_bg_splash_sky",
+      "xPercent": 0.0019672084421655167,
+      "yPercent": 0.0004252584385443157,
+      "widthPercent": 0.6316218069433879,
+      "heightPercent": 0.6322763047870004,
+      "rotation": 0,
+      "zIndex": 1
+    },
+    {
+      "asset": "splash_screen_logo_color_snap",
+      "xPercent": 0.062281478760821345,
+      "yPercent": 0.031807316399530425,
+      "widthPercent": 0.5110320589639741,
+      "heightPercent": 0.22347302845035447,
+      "rotation": 0,
+      "zIndex": 2
+    },
+    {
+      "asset": "splash_screen_loading_dots",
+      "xPercent": 0.030614662664971138,
+      "yPercent": 0.2599622580267197,
+      "widthPercent": 0.5532384707567689,
+      "heightPercent": 0.20396581816873088,
+      "rotation": 0,
+      "zIndex": 3
+    }
+  ]
+}
