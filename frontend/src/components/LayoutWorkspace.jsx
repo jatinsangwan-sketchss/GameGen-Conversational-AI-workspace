@@ -42,6 +42,8 @@ export default function LayoutWorkspace({
     screens?.[0]?.name || ''
   )
 
+  const hasSelection = Boolean(selectedId)
+
   useEffect(() => {
     if (!selectedScreenName && screens.length) {
       setSelectedScreenName(screens[0].name)
@@ -55,6 +57,12 @@ export default function LayoutWorkspace({
       setAnnotateNotice('')
     }
   }, [annotateMode])
+
+  useEffect(() => {
+    if (!selectedScreenName) {
+      setSelectedId(null)
+    }
+  }, [selectedScreenName])
 
 
   useEffect(() => {
@@ -161,6 +169,38 @@ export default function LayoutWorkspace({
       }
     }))
   }
+
+  function handleRemoveSelected() {
+    if (annotateMode || isEditingAsset) return
+    if (!selectedId) return
+    const next = elements.filter((el) => el.id !== selectedId)
+    setLayoutByScreen?.((prev) => ({
+      ...prev,
+      [selectedScreenName]: {
+        screenName: selectedScreenName,
+        elements: next
+      }
+    }))
+    setSelectedId(null)
+  }
+
+  useEffect(() => {
+    if (!hasSelection) return
+    function handleKeyDown(event) {
+      if (annotateMode || isEditingAsset) return
+      const target = event.target
+      const tag = target?.tagName?.toLowerCase()
+      if (tag === 'input' || tag === 'textarea' || target?.isContentEditable) {
+        return
+      }
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        event.preventDefault()
+        handleRemoveSelected()
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [hasSelection, annotateMode, isEditingAsset, selectedId, elements])
 
 
   async function handleSave() {
@@ -289,7 +329,7 @@ export default function LayoutWorkspace({
           <div style={{ color: layoutColors.textMuted, fontSize: '12px' }}>
             {annotateMode
               ? 'Annotate mode: click an asset to edit its visual style'
-              : 'Drag assets into the canvas and resize as needed'}
+              : 'Drag assets into the canvas'}
           </div>
           <div style={{ display: 'flex', gap: '8px' }}>
             <button
@@ -321,6 +361,21 @@ export default function LayoutWorkspace({
               }}
             >
               Save Screen
+            </button>
+            <button
+              onClick={handleRemoveSelected}
+              disabled={!hasSelection || annotateMode || isEditingAsset}
+              style={{
+                padding: '10px 16px',
+                borderRadius: '8px',
+                border: `1px solid ${layoutColors.border}`,
+                background: !hasSelection || annotateMode || isEditingAsset ? '#1f2937' : '#111827',
+                color: !hasSelection || annotateMode || isEditingAsset ? '#64748b' : '#f8fafc',
+                fontWeight: 600,
+                cursor: !hasSelection || annotateMode || isEditingAsset ? 'not-allowed' : 'pointer'
+              }}
+            >
+              Remove
             </button>
           </div>
         </div>

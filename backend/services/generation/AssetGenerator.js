@@ -144,7 +144,7 @@ export async function generateAsset({
   if (!image?.b64_json) throw new Error("Asset generation failed")
 
   const buffer = Buffer.from(image.b64_json, "base64")
-
+                                 
   const fileName = `${component.name}_${component.variant || "default"}.png`
   const screenFolder = getScreenFolderName(screenName)
   const filePath = getAssetFilePath(gameName, screenName, fileName)
