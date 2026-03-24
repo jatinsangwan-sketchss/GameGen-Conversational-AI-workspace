@@ -15,6 +15,9 @@ Available intents:
 - SMALL_TALK
 - UNKNOWN
 
+Session State:
+hasExistingScreens: ${hasExistingScreens}
+
 Context Rules:
 
 1. If there are NO existing screens and user provides structured UI description → NEW_PRD.
@@ -25,15 +28,13 @@ Context Rules:
 6. Greetings or irrelevant text → SMALL_TALK.
 7. Otherwise → UNKNOWN.
 
-Session State:
-hasExistingScreens: ${hasExistingScreens}
 
 Return ONLY valid JSON:
 {
   "intent": "NEW_PRD | ADD_SCREEN | UPDATE_DESIGN | REGENERATE_ALL | GENERATE_ASSETS | SMALL_TALK | UNKNOWN"
 }
 `
-
+  
   const response = await openai.chat.completions.create({
     model: TEXT_MODEL,
     temperature: 0,

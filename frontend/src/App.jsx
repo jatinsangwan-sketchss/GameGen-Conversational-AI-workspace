@@ -25,6 +25,29 @@ const colors = {
 
 // Legacy artifact renderer removed for asset-first UI
 
+const WORKSPACE_STORAGE_KEY = 'nexverse_workspace_v1'
+
+function loadWorkspaceSnapshot() {
+  try {
+    const raw = window.localStorage.getItem(WORKSPACE_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return null
+    return parsed
+  } catch (err) {
+    console.warn('Failed to load workspace snapshot:', err)
+    return null
+  }
+}
+
+function saveWorkspaceSnapshot(snapshot) {
+  try {
+    window.localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(snapshot))
+  } catch (err) {
+    console.warn('Failed to save workspace snapshot:', err)
+  }
+}
+
 function WorkspaceGeneratingCard() {
   return (
     <>
@@ -184,6 +207,7 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const messagesEndRef = useRef(null)
   const chatContainerRef = useRef(null)
+  const persistTimerRef = useRef(null)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -192,6 +216,47 @@ export default function App() {
   useEffect(() => {
     scrollToBottom()
   }, [messages])
+
+  useEffect(() => {
+    const snapshot = loadWorkspaceSnapshot()
+    if (!snapshot) return
+    if (Array.isArray(snapshot.messages)) {
+      setMessages(snapshot.messages)
+    }
+    if (Array.isArray(snapshot.screens)) {
+      setScreens(snapshot.screens)
+    }
+    if (snapshot.assets && typeof snapshot.assets === 'object') {
+      setAssets(snapshot.assets)
+    }
+    if (snapshot.layoutByScreen && typeof snapshot.layoutByScreen === 'object') {
+      setLayoutByScreen(snapshot.layoutByScreen)
+    }
+    if (typeof snapshot.designContext === 'string') {
+      setDesignContext(snapshot.designContext)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (persistTimerRef.current) {
+      clearTimeout(persistTimerRef.current)
+    }
+    persistTimerRef.current = setTimeout(() => {
+      saveWorkspaceSnapshot({
+        messages,
+        screens,
+        assets,
+        layoutByScreen,
+        designContext
+      })
+    }, 300)
+
+    return () => {
+      if (persistTimerRef.current) {
+        clearTimeout(persistTimerRef.current)
+      }
+    }
+  }, [messages, screens, assets, layoutByScreen, designContext])
 
   async function sendMessage() {
     if (!input.trim() || loading) return
@@ -260,6 +325,7 @@ export default function App() {
     setAssets({})
     setDesignContext(null)
     setLayoutByScreen({})
+    window.localStorage.removeItem(WORKSPACE_STORAGE_KEY)
     fetch(`${API_BASE_URL}/api/chat/clear`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
