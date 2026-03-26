@@ -1,0 +1,50 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "RepairReport",
+    "type": "object",
+    "required": [
+      "project_name",
+      "input_validation_status",
+      "repairs_attempted",
+      "result_status"
+    ],
+    "properties": {
+      "project_name": {
+        "type": "string"
+      },
+      "input_validation_status": {
+        "type": "string",
+        "enum": ["pass", "fail", "partial"]
+      },
+      "repairs_attempted": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["issue", "action"],
+          "properties": {
+            "issue": { "type": "string" },
+            "action": { "type": "string" },
+            "files_changed": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "notes": { "type": "string" }
+          }
+        }
+      },
+      "result_status": {
+        "type": "string",
+        "enum": ["improved", "unchanged", "failed", "resolved"]
+      },
+      "remaining_issues": {
+        "type": "array",
+        "items": { "type": "string" }
+      },
+      "next_recommended_action": {
+        "type": "string"
+      },
+      "generated_at": {
+        "type": "string"
+      }
+    }
+  }

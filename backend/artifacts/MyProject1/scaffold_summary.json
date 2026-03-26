@@ -1,0 +1,46 @@
+{
+  "ok": true,
+  "project_name": "MyProject1",
+  "starter_template": "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/ai-starter-template",
+  "target_path": "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project",
+  "overwrite_used": true,
+  "run_id": "run_002",
+  "template_validation": {
+    "is_valid": true,
+    "required_files_checked": [
+      "project.godot",
+      "AGENTS.md",
+      "docs/conventions.md",
+      "docs/implementation-brief.md"
+    ],
+    "required_dirs_checked": [
+      "scenes",
+      "scripts",
+      "systems",
+      "docs"
+    ]
+  },
+  "copied_project_validation": {
+    "is_valid": true,
+    "required_files_checked": [
+      "project.godot",
+      "AGENTS.md",
+      "docs/conventions.md",
+      "docs/implementation-brief.md"
+    ],
+    "required_dirs_checked": [
+      "scenes",
+      "scripts",
+      "systems",
+      "docs"
+    ]
+  },
+  "artifacts": {
+    "artifacts_root": "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts",
+    "project_artifacts_dir": "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1",
+    "run_artifacts_dir": "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002",
+    "reports_dir": "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/reports",
+    "intermediate_dir": "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/intermediate",
+    "logs_dir": "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/logs"
+  }
+}

@@ -1,0 +1,284 @@
+{
+  "project_name": "demo_game",
+  "run_id": "run_001",
+  "project_root": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/target/demo_game",
+  "ok": true,
+  "failures": [],
+  "artifacts": {
+    "artifactsRoot": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts",
+    "projectArtifactsDir": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts/demo_game",
+    "runArtifactsDir": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts/demo_game/run_001",
+    "intermediateDir": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts/demo_game/run_001/intermediate",
+    "reportsDir": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts/demo_game/run_001/reports",
+    "logsDir": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts/demo_game/run_001/logs"
+  },
+  "stages": {
+    "spec_ingest": {
+      "ok": true,
+      "normalized_spec": {
+        "project_name": "demo_game",
+        "platform": "android",
+        "orientation": "portrait",
+        "genre": "prototype",
+        "summary": "demo summary",
+        "core_loop": "core loop",
+        "player_fantasy": "fantasy",
+        "input_model": {
+          "type": "touch",
+          "rules": [
+            "swipe to move"
+          ]
+        },
+        "fail_condition": "fail",
+        "score_model": "score model",
+        "difficulty_model": "difficulty model",
+        "scenes": [
+          {
+            "name": "Gameplay",
+            "purpose": "play"
+          }
+        ],
+        "ui": {
+          "screens": [
+            "HUD"
+          ],
+          "hud_elements": [
+            "score_label"
+          ],
+          "layout_notes": []
+        },
+        "entities": [
+          {
+            "name": "Player",
+            "role": "player"
+          }
+        ],
+        "systems": [],
+        "out_of_scope": [
+          "none"
+        ],
+        "acceptance_criteria": [
+          "runs"
+        ],
+        "open_questions": []
+      },
+      "validation": {
+        "is_valid": true,
+        "errors": []
+      },
+      "parse_error": null,
+      "repaired": false,
+      "output_path": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts/demo_game/run_001/intermediate/normalized_game_spec.json"
+    },
+    "planning": {
+      "ok": true,
+      "generation_recipe": {
+        "project_name": "demo_game",
+        "starter_template": "starter",
+        "target_path": "target",
+        "scenes_to_create": [
+          {
+            "path": "scenes/gameplay.tscn",
+            "root_type": "Node2D",
+            "root_name": "Gameplay",
+            "nodes": []
+          }
+        ],
+        "scripts_to_create": [
+          {
+            "path": "scripts/gameplay/gameplay_controller.gd",
+            "role": "controller",
+            "scene_owned": true,
+            "dependencies": []
+          }
+        ],
+        "systems_to_create": [],
+        "ui_to_create": [],
+        "config_files_to_create": [],
+        "validation_checks": [
+          {
+            "id": "scene_files_exist",
+            "description": "scenes exist"
+          }
+        ],
+        "repair_hints": []
+      },
+      "validation": {
+        "is_valid": true,
+        "errors": []
+      },
+      "parse_error": null,
+      "repaired": false,
+      "output_path": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts/demo_game/run_001/intermediate/generation_recipe.json"
+    },
+    "scaffolding": {
+      "ok": true,
+      "project_name": "demo_game",
+      "starter_template": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/starter",
+      "target_path": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/target/demo_game",
+      "overwrite_used": true,
+      "run_id": "run_001",
+      "template_validation": {
+        "is_valid": true,
+        "required_files_checked": [
+          "project.godot",
+          "AGENTS.md",
+          "docs/conventions.md",
+          "docs/implementation-brief.md"
+        ],
+        "required_dirs_checked": [
+          "scenes",
+          "scripts",
+          "systems",
+          "docs"
+        ]
+      },
+      "copied_project_validation": {
+        "is_valid": true,
+        "required_files_checked": [
+          "project.godot",
+          "AGENTS.md",
+          "docs/conventions.md",
+          "docs/implementation-brief.md"
+        ],
+        "required_dirs_checked": [
+          "scenes",
+          "scripts",
+          "systems",
+          "docs"
+        ]
+      },
+      "artifacts": {
+        "artifacts_root": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts",
+        "project_artifacts_dir": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts/demo_game",
+        "run_artifacts_dir": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts/demo_game/run_001",
+        "reports_dir": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts/demo_game/run_001/reports",
+        "intermediate_dir": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts/demo_game/run_001/intermediate",
+        "logs_dir": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts/demo_game/run_001/logs"
+      },
+      "summary_path": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts/demo_game/scaffold_summary.json"
+    },
+    "generation": {
+      "ok": true,
+      "project_name": "demo_game",
+      "project_root": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/target/demo_game",
+      "model_name": "gpt-oss-20b",
+      "dry_run": true,
+      "summary": {
+        "scenes_processed": 1,
+        "scripts_processed": 1,
+        "systems_processed": 0,
+        "ui_processed": 0,
+        "config_files_processed": 0,
+        "total_created_paths": 2,
+        "total_errors": 0
+      },
+      "created_paths": [
+        "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/target/demo_game/scenes/gameplay.tscn",
+        "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/target/demo_game/scripts/gameplay/gameplay_controller.gd"
+      ],
+      "errors": [],
+      "steps": {
+        "scenes": [
+          {
+            "scene_path": "scenes/gameplay.tscn",
+            "status": "ok",
+            "actions": [
+              "create_scene"
+            ]
+          }
+        ],
+        "scripts": [
+          {
+            "path": "scripts/gameplay/gameplay_controller.gd",
+            "status": "ok"
+          }
+        ],
+        "systems": [],
+        "ui": [],
+        "config_files": []
+      },
+      "result_path": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts/demo_game/run_001/intermediate/generation_result.json"
+    },
+    "validation": {
+      "ok": true,
+      "validation_report": {
+        "project_name": "demo_game",
+        "status": "pass",
+        "checks": [
+          {
+            "id": "required_scenes_exist",
+            "description": "All required scene files from recipe exist.",
+            "status": "pass",
+            "details": "All required files exist."
+          },
+          {
+            "id": "required_scripts_exist",
+            "description": "All required script files from recipe exist.",
+            "status": "pass",
+            "details": "All required files exist."
+          },
+          {
+            "id": "required_systems_exist",
+            "description": "All required shared system files from recipe exist.",
+            "status": "pass",
+            "details": "All required files exist."
+          },
+          {
+            "id": "required_config_files_exist",
+            "description": "All required config files from recipe exist.",
+            "status": "pass",
+            "details": "All required files exist."
+          },
+          {
+            "id": "scene_files_exist",
+            "description": "scenes exist",
+            "status": "pass",
+            "details": "All scene files exist."
+          },
+          {
+            "id": "bounded_runtime_startup",
+            "description": "Project starts and runs within bounded runtime window.",
+            "status": "pass",
+            "details": "Runtime succeeded."
+          }
+        ],
+        "errors": [],
+        "warnings": [],
+        "generated_at": "2026-03-25T07:49:45.571Z",
+        "debug_output_excerpt": "[]"
+      },
+      "runtime_result": {
+        "ok": true,
+        "action": "run_project",
+        "backend": "stub",
+        "inputs": {},
+        "output": {
+          "stderr": ""
+        },
+        "error": null
+      },
+      "output_path": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts/demo_game/run_001/reports/validation_report.json"
+    },
+    "repair": {
+      "project_name": "demo_game",
+      "input_validation_status": "partial",
+      "repairs_attempted": [
+        {
+          "issue": "batch_missing_files",
+          "action": "apply_minimal_safe_repairs",
+          "files_changed": [
+            "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/target/demo_game/scenes/gameplay.tscn",
+            "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/target/demo_game/scripts/gameplay/gameplay_controller.gd"
+          ],
+          "notes": ""
+        }
+      ],
+      "result_status": "resolved",
+      "remaining_issues": [],
+      "next_recommended_action": "Project validation passed after repairs.",
+      "generated_at": "2026-03-25T07:49:45.570Z",
+      "output_path": "/Users/ishanharshaddiwekar/AI3/artifacts/_tmp_js_tests/out_runner_repair/artifacts/demo_game/run_001/reports/repair_report.json"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "godot": {
+    "command": "npx",
+    "args": [
+      "/Users/ishanharshaddiwekar/GodotProjects/godot-mcp/mcp-server/dist/index.js"
+    ],
+    "env": {
+      "DEBUG": "true"
+    },
+    "working_directory": null
+  }
+}

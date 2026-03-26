@@ -1,0 +1,120 @@
+{
+  "project_name": "MyProject1",
+  "status": "partial",
+  "checks": [
+    {
+      "id": "required_scenes_exist",
+      "description": "All required scene files from recipe exist.",
+      "status": "pass",
+      "details": "All required files exist."
+    },
+    {
+      "id": "required_scripts_exist",
+      "description": "All required script files from recipe exist.",
+      "status": "pass",
+      "details": "All required files exist."
+    },
+    {
+      "id": "required_systems_exist",
+      "description": "All required shared system files from recipe exist.",
+      "status": "pass",
+      "details": "All required files exist."
+    },
+    {
+      "id": "scene_file_exists",
+      "description": "Verify that MainMenu.tscn, Gameplay.tscn, and FailPopup.tscn exist in the scenes folder.",
+      "status": "pass",
+      "details": "All scene files exist."
+    },
+    {
+      "id": "script_file_exists",
+      "description": "Verify that all listed script files exist in the scripts folder.",
+      "status": "pass",
+      "details": "All script files exist."
+    },
+    {
+      "id": "required_nodes_present",
+      "description": "Check that Gameplay scene contains nodes: Player, EnemySpawner, HUD, ScoreManager, DifficultyScaler.",
+      "status": "skip",
+      "details": "No dedicated v1 evaluator for this check id yet."
+    },
+    {
+      "id": "player_input_handler",
+      "description": "Ensure Player node has a script that connects to InputEvent and processes typed characters.",
+      "status": "skip",
+      "details": "No dedicated v1 evaluator for this check id yet."
+    },
+    {
+      "id": "enemy_spawn_logic",
+      "description": "Verify EnemySpawner script emits a signal or directly instantiates EnemyLetter nodes.",
+      "status": "skip",
+      "details": "No dedicated v1 evaluator for this check id yet."
+    },
+    {
+      "id": "hud_display",
+      "description": "Confirm HUD contains a Label node that updates survival time.",
+      "status": "skip",
+      "details": "No dedicated v1 evaluator for this check id yet."
+    },
+    {
+      "id": "bounded_runtime_startup",
+      "description": "Project starts and runs within bounded runtime window.",
+      "status": "pass",
+      "details": "Runtime succeeded."
+    }
+  ],
+  "errors": [
+    {
+      "type": "acceptance_check_skipped",
+      "message": "Validation check skipped (no v1 evaluator): required_nodes_present",
+      "suggested_category": "acceptance"
+    },
+    {
+      "type": "acceptance_check_skipped",
+      "message": "Validation check skipped (no v1 evaluator): player_input_handler",
+      "suggested_category": "acceptance"
+    },
+    {
+      "type": "acceptance_check_skipped",
+      "message": "Validation check skipped (no v1 evaluator): enemy_spawn_logic",
+      "suggested_category": "acceptance"
+    },
+    {
+      "type": "acceptance_check_skipped",
+      "message": "Validation check skipped (no v1 evaluator): hud_display",
+      "suggested_category": "acceptance"
+    }
+  ],
+  "warnings": [
+    {
+      "message": "Executor action failed during run: save_scene (MCP client is not configured for this executor.)",
+      "file": ""
+    },
+    {
+      "message": "Executor action failed during run: add_node (MCP client is not configured for this executor.)",
+      "file": ""
+    },
+    {
+      "message": "Executor action failed during run: save_scene (MCP client is not configured for this executor.)",
+      "file": ""
+    },
+    {
+      "message": "Executor action failed during run: add_node (MCP client is not configured for this executor.)",
+      "file": ""
+    },
+    {
+      "message": "Executor action failed during run: save_scene (MCP client is not configured for this executor.)",
+      "file": ""
+    },
+    {
+      "message": "Executor action failed during run: add_node (MCP client is not configured for this executor.)",
+      "file": ""
+    },
+    {
+      "message": "Executor action failed during run: save_scene (MCP client is not configured for this executor.)",
+      "file": ""
+    }
+  ],
+  "generated_at": "2026-03-25T14:50:57.601Z",
+  "debug_output_excerpt": "[\n  {\n    \"ok\": false,\n    \"action\": \"add_node\",\n    \"backend\": \"mcp\",\n    \"inputs\": {\n      \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n      \"scene_path\": \"scenes/FailPopup.tscn\",\n      \"node_name\": \"MenuButton\",\n      \"node_type\": \"Button\",\n      \"parent_path\": \"FailPopup\"\n    },\n    \"output\": {},\n    \"error\": \"MCP client is not configured for this executor.\"\n  },\n  {\n    \"ok\": false,\n    \"action\": \"save_scene\",\n    \"backend\": \"mcp\",\n    \"inputs\": {\n      \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n      \"scene_path\": \"scenes/FailPopup.tscn\"\n    },\n    \"output\": {},\n    \"error\": \"MCP client is not configured for this executor.\"\n  },\n  {\n    \"ok\": true,\n    \"action\": \"run_project\",\n    \"backend\": \"cli\",\n    \"inputs\": {\n      \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n      \"command\": [\n        \"godot\",\n        \"--headless\",\n        \"--quit\",\n        \"--path\",\n        \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\"\n      ],\n      \"timeout_seconds\": 5\n    },\n    \"output\": {\n      \"stdout\": \"Godot Engine v4.6.stable.official.89cea1439 - https://godotengine.org\\n\\n\",\n      \"stderr\": \"\",\n      \"exit_code\": 0\n    },\n    \"error\": null\n  },\n  {\n    \"ok\": true,\n    \"action\": \"get_debug_output\",\n    \"backend\": \"executor\",\n    \"inputs\": {\n      \"last_n\": 25\n    },\n    \"output\": {\n      \"actions\": [\n        {\n          \"ok\": false,\n          \"action\": \"create_scene\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/Gameplay.tscn\",\n            \"root_type\": \"Node2D\",\n            \"root_name\": \"Gameplay\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"save_scene\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/Gameplay.tscn\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"add_node\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/Gameplay.tscn\",\n            \"node_name\": \"Player\",\n            \"node_type\": \"Node2D\",\n            \"parent_path\": \"Gameplay\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"attach_script\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/Gameplay.tscn\",\n            \"node_name\": \"Player\",\n            \"script_path\": \"scripts/Player.gd\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"save_scene\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/Gameplay.tscn\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"add_node\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/Gameplay.tscn\",\n            \"node_name\": \"EnemySpawner\",\n            \"node_type\": \"Node2D\",\n            \"parent_path\": \"Gameplay\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"attach_script\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/Gameplay.tscn\",\n            \"node_name\": \"EnemySpawner\",\n            \"script_path\": \"scripts/EnemySpawner.gd\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"save_scene\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/Gameplay.tscn\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"add_node\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/Gameplay.tscn\",\n            \"node_name\": \"HUD\",\n            \"node_type\": \"Control\",\n            \"parent_path\": \"Gameplay\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"save_scene\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/Gameplay.tscn\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"add_node\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/Gameplay.tscn\",\n            \"node_name\": \"ScoreManager\",\n            \"node_type\": \"Node2D\",\n            \"parent_path\": \"Gameplay\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"attach_script\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/Gameplay.tscn\",\n            \"node_name\": \"ScoreManager\",\n            \"script_path\": \"scripts/ScoreManager.gd\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"save_scene\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/Gameplay.tscn\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"add_node\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/Gameplay.tscn\",\n            \"node_name\": \"DifficultyScaler\",\n            \"node_type\": \"Node2D\",\n            \"parent_path\": \"Gameplay\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"attach_script\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/Gameplay.tscn\",\n            \"node_name\": \"DifficultyScaler\",\n            \"script_path\": \"scripts/DifficultyScaler.gd\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"save_scene\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/Gameplay.tscn\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"create_scene\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/FailPopup.tscn\",\n            \"root_type\": \"Control\",\n            \"root_name\": \"FailPopup\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"save_scene\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/FailPopup.tscn\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"add_node\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/FailPopup.tscn\",\n            \"node_name\": \"ResultLabel\",\n            \"node_type\": \"Label\",\n            \"parent_path\": \"FailPopup\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"save_scene\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/FailPopup.tscn\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"add_node\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/FailPopup.tscn\",\n            \"node_name\": \"RetryButton\",\n            \"node_type\": \"Button\",\n            \"parent_path\": \"FailPopup\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"save_scene\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/FailPopup.tscn\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"add_node\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/FailPopup.tscn\",\n            \"node_name\": \"MenuButton\",\n            \"node_type\": \"Button\",\n            \"parent_path\": \"FailPopup\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": false,\n          \"action\": \"save_scene\",\n          \"backend\": \"mcp\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"scene_path\": \"scenes/FailPopup.tscn\"\n          },\n          \"output\": {},\n          \"error\": \"MCP client is not configured for this executor.\"\n        },\n        {\n          \"ok\": true,\n          \"action\": \"run_project\",\n          \"backend\": \"cli\",\n          \"inputs\": {\n            \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n            \"command\": [\n              \"godot\",\n              \"--headless\",\n              \"--quit\",\n              \"--path\",\n              \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\"\n            ],\n            \"timeout_seconds\": 5\n          },\n          \"output\": {\n            \"stdout\": \"Godot Engine v4.6.stable.official.89cea1439 - https://godotengine.org\\n\\n\",\n            \"stderr\": \"\",\n            \"exit_code\": 0\n          },\n          \"error\": null\n        }\n      ]\n    },\n    \"error\": null\n  },\n  {\n    \"ok\": true,\n    \"action\": \"run_project\",\n    \"backend\": \"cli\",\n    \"inputs\": {\n      \"project_root\": \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\",\n      \"command\": [\n        \"godot\",\n        \"--headless\",\n        \"--quit\",\n        \"--path\",\n        \"/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project\"\n      ],\n      \"timeout_seconds\": 5\n    },\n    \"output\": {\n      \"stdout\": \"Godot Engine v4.6.stable.official.89cea1439 - https://godotengine.org\\n\\n\",\n      \"stderr\": \"\",\n      \"exit_code\": 0\n    },\n    \"error\": null\n  }\n]"
+}

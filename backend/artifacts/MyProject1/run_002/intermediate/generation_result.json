@@ -1,0 +1,87 @@
+{
+  "ok": true,
+  "project_name": "MyProject1",
+  "project_root": "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project",
+  "model_name": "gpt-oss:20b",
+  "dry_run": false,
+  "summary": {
+    "scenes_processed": 3,
+    "scripts_processed": 5,
+    "systems_processed": 0,
+    "ui_processed": 0,
+    "config_files_processed": 0,
+    "total_created_paths": 8,
+    "total_errors": 0
+  },
+  "created_paths": [
+    "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project/scenes/MainMenu.tscn",
+    "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project/scenes/Gameplay.tscn",
+    "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project/scenes/FailPopup.tscn",
+    "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project/scripts/Player.gd",
+    "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project/scripts/EnemySpawner.gd",
+    "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project/scripts/ScoreManager.gd",
+    "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project/scripts/DifficultyScaler.gd",
+    "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project/scripts/EnemyLetter.gd"
+  ],
+  "errors": [],
+  "steps": {
+    "scenes": [
+      {
+        "scene_path": "scenes/MainMenu.tscn",
+        "status": "ok",
+        "actions": [
+          "create_scene",
+          "add_node:TitleLabel",
+          "add_node:PlayButton"
+        ]
+      },
+      {
+        "scene_path": "scenes/Gameplay.tscn",
+        "status": "ok",
+        "actions": [
+          "create_scene",
+          "add_node:Player",
+          "add_node:EnemySpawner",
+          "add_node:HUD",
+          "add_node:ScoreManager",
+          "add_node:DifficultyScaler"
+        ]
+      },
+      {
+        "scene_path": "scenes/FailPopup.tscn",
+        "status": "ok",
+        "actions": [
+          "create_scene",
+          "add_node:ResultLabel",
+          "add_node:RetryButton",
+          "add_node:MenuButton"
+        ]
+      }
+    ],
+    "scripts": [
+      {
+        "path": "scripts/Player.gd",
+        "status": "ok"
+      },
+      {
+        "path": "scripts/EnemySpawner.gd",
+        "status": "ok"
+      },
+      {
+        "path": "scripts/ScoreManager.gd",
+        "status": "ok"
+      },
+      {
+        "path": "scripts/DifficultyScaler.gd",
+        "status": "ok"
+      },
+      {
+        "path": "scripts/EnemyLetter.gd",
+        "status": "ok"
+      }
+    ],
+    "systems": [],
+    "ui": [],
+    "config_files": []
+  }
+}
