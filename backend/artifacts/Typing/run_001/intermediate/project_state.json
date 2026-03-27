@@ -1,0 +1,17 @@
+{
+  "project_id": "Typing",
+  "project_name": "Typing",
+  "project_root": "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/Typing/run_001/project",
+  "platform": "android",
+  "orientation": "portrait",
+  "run_id": "run_001",
+  "current_status": "validated_pass",
+  "latest_validation_status": "pass",
+  "artifact_paths": {
+    "normalized_game_spec_path": "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/Typing/run_001/intermediate/normalized_game_spec.json",
+    "generation_recipe_path": "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/Typing/run_001/intermediate/generation_recipe.json",
+    "project_state_path": "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/Typing/run_001/intermediate/project_state.json"
+  },
+  "created_at": "2026-03-27T02:41:53.527Z",
+  "updated_at": "2026-03-27T02:41:54.176Z"
+}

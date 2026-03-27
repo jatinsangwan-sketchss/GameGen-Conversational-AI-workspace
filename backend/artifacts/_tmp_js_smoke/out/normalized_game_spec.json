@@ -1,0 +1,47 @@
+{
+  "project_name": "demo_game",
+  "platform": "android",
+  "orientation": "portrait",
+  "genre": "prototype",
+  "summary": "demo summary",
+  "core_loop": "core loop",
+  "player_fantasy": "fantasy",
+  "input_model": {
+    "type": "touch",
+    "rules": [
+      "swipe to move"
+    ]
+  },
+  "fail_condition": "fail",
+  "score_model": "score model",
+  "difficulty_model": "difficulty model",
+  "scenes": [
+    {
+      "name": "Gameplay",
+      "purpose": "play"
+    }
+  ],
+  "ui": {
+    "screens": [
+      "HUD"
+    ],
+    "hud_elements": [
+      "score_label"
+    ],
+    "layout_notes": []
+  },
+  "entities": [
+    {
+      "name": "Player",
+      "role": "player"
+    }
+  ],
+  "systems": [],
+  "out_of_scope": [
+    "none"
+  ],
+  "acceptance_criteria": [
+    "runs"
+  ],
+  "open_questions": []
+}

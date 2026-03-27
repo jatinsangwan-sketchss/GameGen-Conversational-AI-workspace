@@ -1,0 +1,91 @@
+{
+  "project_name": "Typing Survival",
+  "starter_template": "./ai-starter-template",
+  "target_path": "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/Typing/run_001/project",
+  "scenes_to_create": [
+    {
+      "path": "scenes/sceed.tscn",
+      "root_type": "Node2D",
+      "root_name": "scscs",
+      "nodes": []
+    }
+  ],
+  "scripts_to_create": [
+    {
+      "path": "scripts/MainMenu.gd",
+      "role": "MainMenu",
+      "scene_owned": true,
+      "dependencies": []
+    },
+    {
+      "path": "scripts/Player.gd",
+      "role": "Player",
+      "scene_owned": true,
+      "dependencies": []
+    },
+    {
+      "path": "scripts/LetterSpawner.gd",
+      "role": "LetterSpawner",
+      "scene_owned": true,
+      "dependencies": []
+    },
+    {
+      "path": "scripts/HUD.gd",
+      "role": "HUD",
+      "scene_owned": true,
+      "dependencies": []
+    },
+    {
+      "path": "scripts/FailPopup.gd",
+      "role": "FailPopup",
+      "scene_owned": true,
+      "dependencies": []
+    },
+    {
+      "path": "scripts/LetterEnemy.gd",
+      "role": "LetterEnemy",
+      "scene_owned": true,
+      "dependencies": []
+    }
+  ],
+  "systems_to_create": [],
+  "ui_to_create": [],
+  "config_files_to_create": [],
+  "validation_checks": [
+    {
+      "id": "check_main_menu_start_button",
+      "description": "Main Menu scene contains a Button node named 'StartButton'."
+    },
+    {
+      "id": "check_gameplay_player_node",
+      "description": "Gameplay scene contains a Node2D named 'Player'."
+    },
+    {
+      "id": "check_gameplay_letter_spawner_node",
+      "description": "Gameplay scene contains a Node2D named 'LetterSpawner'."
+    },
+    {
+      "id": "check_gameplay_hud_node",
+      "description": "Gameplay scene contains a Control node named 'HUD'."
+    },
+    {
+      "id": "check_letter_enemy_scene",
+      "description": "LetterEnemy scene contains a Label node named 'LetterLabel'."
+    },
+    {
+      "id": "check_fail_popup_nodes",
+      "description": "FailPopup scene contains Label 'ResultLabel' and Buttons 'RetryButton' and 'MenuButton'."
+    },
+    {
+      "id": "check_scripts_exist",
+      "description": "All referenced script files exist in the project."
+    }
+  ],
+  "repair_hints": [
+    "Ensure that the 'StartButton' in MainMenu is connected to a signal that loads the Gameplay scene.",
+    "Add a Timer node to LetterSpawner to handle spawn intervals and difficulty scaling.",
+    "Implement input handling in Player.gd to match typed letters with spawned LetterEnemy instances.",
+    "Add a Label named 'SurvivalTimeLabel' inside HUD to display the survival time.",
+    "Connect the 'RetryButton' in FailPopup to reload the Gameplay scene and the 'MenuButton' to load MainMenu."
+  ]
+}
