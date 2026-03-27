@@ -19,7 +19,7 @@ import { buildGenerationRecipe } from "../../planner.js";
 import { scaffoldProject } from "../../project_scaffolder.js";
 import { createLLMClient } from "../../llm/client.js";
 import { generateProjectFromRecipe } from "../../generator.js";
-import { validateProject } from "../validation/Validator.js";
+import { validateProject } from "../validation/validator.js";
 import { GodotExecutor } from "../godot/GodotExecutor.js";
 import { runRepairLoop } from "../repair/RepairLoop.js";
 

@@ -616,7 +616,7 @@ Notes:
 Run the JS pipeline end-to-end using the real LLM + headless Godot validation.
 
 ```bash
-node factory-js/runner.js \
+node factory-js/FactoryRunner.js \
   --project-name "demo_game" \
   --prd-path "./path/to/prd.md" \
   --gdd-path "./path/to/gdd.md" \
@@ -654,8 +654,16 @@ Planned sections to add as those subsystems are introduced:
 
 ### Godot / MCP Integration
 
-- Planned: run MCP integration smoke tests (when a concrete MCP repo + executable exists)
-- Planned: validate MCP scene/node operations against known templates
+GODOT_MCP_ENABLED=true \
+GODOT_MCP_STARTUP=local \
+GODOT_MCP_NODE_COMMAND=node \
+GODOT_MCP_LOCAL_ENTRY="/Users/ishanharshaddiwekar/GodotProjects/godot-mcp/build/index.js" \
+GODOT_MCP_WORKING_DIRECTORY="/Users/ishanharshaddiwekar/GodotProjects/godot-mcp" \
+GODOT_MCP_DEBUG=true \
+node "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/factory-js/runEditMode.js" \
+  --project-root "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/project" \
+  --source-of-truth-dir "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/MyProject1/run_002/intermediate" \
+  --bounded-validation-seconds 10
 
 ### Frontend / Web Portal
 
