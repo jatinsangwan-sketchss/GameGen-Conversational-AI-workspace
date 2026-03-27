@@ -9,6 +9,7 @@
  */
 
 import { runTerminalEditMode } from "./src/conversation/TerminalEditModeRunner.js";
+import { getGoPeakSessionManager } from "./src/godot/GoPeakSessionManager.js";
 
 function parseArg(argv, flag) {
   const idx = argv.indexOf(flag);
@@ -20,7 +21,7 @@ function hasFlag(argv, flag) {
   return argv.includes(flag);
 }
 
-function main() {
+async function main() {
   const argv = process.argv.slice(2);
 
   const projectRoot = parseArg(argv, "--project-root");
@@ -56,26 +57,63 @@ function main() {
 
   const executor = null; // TerminalEditModeRunner will construct a default v1 GodotExecutor.
 
-  runTerminalEditMode({
-    projectRoot,
-    sourceOfTruthDir,
-    artifactsRoot,
-    projectId,
-    runId,
+  const sessionManager = getGoPeakSessionManager();
+  let cleanupStarted = false;
+  const cleanup = async (reason) => {
+    if (cleanupStarted) return;
+    cleanupStarted = true;
+    try {
+      const res = await sessionManager.shutdown({ reason });
+      console.log("[runEditMode] cleanup", res);
+    } catch (err) {
+      console.error("[runEditMode] cleanup failed:", err?.stack ?? String(err));
+    }
+  };
 
-    boundedValidationSeconds,
-    strictValidation,
+  const bindShutdownSignalHandlers = () => {
+    const handleSignal = (signal, code) => {
+      console.log(`[runEditMode] received ${signal}, shutting down GoPeak session...`);
+      cleanup(`signal:${signal}`).finally(() => process.exit(code));
+    };
+    process.on("SIGINT", () => handleSignal("SIGINT", 130));
+    process.on("SIGTERM", () => handleSignal("SIGTERM", 143));
+    process.on("unhandledRejection", (err) => {
+      console.error("[runEditMode] unhandledRejection:", err);
+      cleanup("unhandledRejection").finally(() => process.exit(1));
+    });
+    process.on("uncaughtException", (err) => {
+      console.error("[runEditMode] uncaughtException:", err);
+      cleanup("uncaughtException").finally(() => process.exit(1));
+    });
+    process.on("exit", (code) => {
+      console.log(`[runEditMode] process exit code=${code} cleanup_started=${cleanupStarted}`);
+    });
+  };
+  bindShutdownSignalHandlers();
 
-    llmConfig,
-    modelName,
-    executor,
-    onEvent: (e) => {
-      // TerminalEditModeRunner already prints events; keep this noop hook for future.
-    },
-  }).catch((err) => {
+  try {
+    await runTerminalEditMode({
+      projectRoot,
+      sourceOfTruthDir,
+      artifactsRoot,
+      projectId,
+      runId,
+      boundedValidationSeconds,
+      strictValidation,
+      llmConfig,
+      modelName,
+      executor,
+      sessionManager,
+      onEvent: (_e) => {
+        // TerminalEditModeRunner already prints events; keep this noop hook for future.
+      },
+    });
+  } catch (err) {
     console.error("runEditMode failed:", err);
-    process.exit(1);
-  });
+    process.exitCode = 1;
+  } finally {
+    await cleanup("finally");
+  }
 }
 
 main();

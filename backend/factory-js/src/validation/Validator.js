@@ -13,6 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { loadJsonSchema, validateDataAgainstSchema } from "../../schema_utils.js";
+import { getSuccessExpectations } from "../godot/GoPeakOperationRegistry.js";
 
 export const DEFAULT_REPORT_SCHEMA_PATH =
   "factory-js/schemas/validation_report.schema.json";
@@ -28,6 +29,7 @@ export async function validateProject({
   schemaPath = DEFAULT_REPORT_SCHEMA_PATH,
   artifactsDir = null,
   projectState = null,
+  executedOperations = null,
 }) {
   ensureObject("generationRecipe", generationRecipe);
   const root = path.resolve(String(projectRoot));
@@ -76,6 +78,21 @@ export async function validateProject({
     warnings,
   });
 
+  // Operation-specific validation (requested outcome proof) complements
+  // generic project/runtime checks. This reduces false-positive "it runs"
+  // success when requested operation outcomes were not applied.
+  runOperationExpectationChecks({
+    root,
+    executedOperations: collectExecutedOperations({
+      explicitOperations: executedOperations,
+      projectState,
+    }),
+    runtimeResult,
+    checks,
+    errors,
+    warnings,
+  });
+
   const report = buildValidationReport({
     projectName,
     checks,
@@ -97,6 +114,239 @@ export async function validateProject({
     runtime_result: runtimeResult,
     output_path: outputPath,
   };
+}
+
+function collectExecutedOperations({ explicitOperations, projectState }) {
+  if (Array.isArray(explicitOperations)) return explicitOperations;
+  const candidates = [
+    projectState?.executed_operations,
+    projectState?.executedOperations,
+    projectState?.operations,
+    projectState?.last_execution?.operations,
+    projectState?.lastExecution?.operations,
+  ];
+  for (const c of candidates) {
+    if (Array.isArray(c)) return c;
+  }
+  return [];
+}
+
+function runOperationExpectationChecks({
+  root,
+  executedOperations,
+  runtimeResult,
+  checks,
+  errors,
+  warnings,
+}) {
+  const ops = Array.isArray(executedOperations) ? executedOperations : [];
+  if (ops.length === 0) {
+    warnings.push({ message: "Operation expectation validation skipped: no executed operations provided.", file: "" });
+    return;
+  }
+
+  for (let idx = 0; idx < ops.length; idx += 1) {
+    const op = normalizeExecutedOperation(ops[idx]);
+    const expectations = getSuccessExpectations(op.action) ?? {};
+    const expectationChecks = buildExpectationChecks({
+      root,
+      operation: op,
+      expectations,
+      runtimeResult,
+    });
+
+    for (const item of expectationChecks) {
+      checks.push({
+        id: `op_${idx + 1}_${op.action}_${item.expectation}`,
+        description: `Operation expectation: ${op.action} -> ${item.expectation}`,
+        status: item.pass ? "pass" : "fail",
+        details: renderExpectationDetails(item),
+      });
+      if (!item.pass) {
+        errors.push({
+          type: "operation_expectation_failed",
+          message: `Operation expectation failed (${op.action}): ${item.expectation}`,
+          suggested_category: "operation_expectation",
+        });
+      }
+    }
+  }
+}
+
+function normalizeExecutedOperation(value) {
+  if (isPlainObject(value) && isPlainObject(value.result)) {
+    return {
+      action: String(value.action ?? value.operation ?? value.result?.operation ?? "unknown"),
+      params: isPlainObject(value.params) ? value.params : {},
+      result: value.result,
+    };
+  }
+  return {
+    action: String(value?.action ?? value?.operation ?? "unknown"),
+    params: isPlainObject(value?.params) ? value.params : {},
+    result: isPlainObject(value?.result) ? value.result : value,
+  };
+}
+
+function buildExpectationChecks({ root, operation, expectations, runtimeResult }) {
+  const checks = [];
+  const action = String(operation.action || "");
+  const params = isPlainObject(operation.params) ? operation.params : {};
+  const result = isPlainObject(operation.result) ? operation.result : {};
+
+  if (expectations.requires_file_written === true) {
+    const rel = normalizeProjectRelativePath(params.script_path ?? params.path ?? null);
+    const abs = rel ? path.resolve(root, rel) : null;
+    checks.push({
+      expectation: "file_exists",
+      pass: Boolean(abs && fs.existsSync(abs)),
+      evidence: { file: rel, exists: Boolean(abs && fs.existsSync(abs)) },
+      reason: abs ? null : "Missing script_path/path in operation params.",
+    });
+    if (abs && fs.existsSync(abs) && typeof params.content === "string") {
+      const content = fs.readFileSync(abs, "utf-8");
+      checks.push({
+        expectation: "file_content_matches",
+        pass: content.includes(params.content),
+        evidence: { file: rel, expected_snippet: params.content.slice(0, 120) },
+        reason: content.includes(params.content) ? null : "File does not contain expected content snippet.",
+      });
+    }
+  }
+
+  if (action === "create_scene" || expectations.requires_scene_written === true) {
+    const rel = normalizeProjectRelativePath(params.scene_path);
+    const abs = rel ? path.resolve(root, rel) : null;
+    const sceneRaw = abs && fs.existsSync(abs) ? fs.readFileSync(abs, "utf-8") : "";
+    checks.push({
+      expectation: "scene_file_exists",
+      pass: Boolean(abs && fs.existsSync(abs)),
+      evidence: { scene: rel, exists: Boolean(abs && fs.existsSync(abs)) },
+      reason: abs ? null : "Missing scene_path parameter.",
+    });
+    if (sceneRaw) {
+      const rootNode = parseSceneRootNode(sceneRaw);
+      const expectedName = safeString(params.root_node_name).trim();
+      const expectedType = safeString(params.root_node_type).trim();
+      if (expectedName) {
+        checks.push({
+          expectation: "scene_root_name_matches",
+          pass: rootNode?.name === expectedName,
+          evidence: { expected: expectedName, actual: rootNode?.name ?? null },
+          reason: rootNode?.name === expectedName ? null : "Scene root name mismatch.",
+        });
+      }
+      if (expectedType) {
+        checks.push({
+          expectation: "scene_root_type_matches",
+          pass: rootNode?.type === expectedType,
+          evidence: { expected: expectedType, actual: rootNode?.type ?? null },
+          reason: rootNode?.type === expectedType ? null : "Scene root type mismatch.",
+        });
+      }
+    }
+  }
+
+  if (action === "add_node" || expectations.requires_scene_mutation === true) {
+    const rel = normalizeProjectRelativePath(params.scene_path);
+    const abs = rel ? path.resolve(root, rel) : null;
+    const sceneRaw = abs && fs.existsSync(abs) ? fs.readFileSync(abs, "utf-8") : "";
+    const nodeName = safeString(params.node_name).trim();
+    if (sceneRaw && nodeName) {
+      checks.push({
+        expectation: "node_exists",
+        pass: sceneRaw.includes(`[node name="${nodeName}"`) || sceneRaw.includes(`name="${nodeName}"`),
+        evidence: { scene: rel, node_name: nodeName },
+        reason: null,
+      });
+    }
+    const properties = isPlainObject(params.properties) ? params.properties : {};
+    for (const [key, value] of Object.entries(properties)) {
+      checks.push({
+        expectation: `property_${key}_applied`,
+        pass: sceneRaw.includes(`${key} =`) && sceneRaw.includes(String(value)),
+        evidence: { scene: rel, key, value },
+        reason: null,
+      });
+    }
+  }
+
+  if (action === "attach_script_to_scene_root") {
+    const rel = normalizeProjectRelativePath(params.scene_path);
+    const abs = rel ? path.resolve(root, rel) : null;
+    const sceneRaw = abs && fs.existsSync(abs) ? fs.readFileSync(abs, "utf-8") : "";
+    const scriptRes = toResPath(params.script_path);
+    checks.push({
+      expectation: "scene_references_script",
+      pass: Boolean(sceneRaw && scriptRes && sceneRaw.includes(scriptRes)),
+      evidence: { scene: rel, script: scriptRes },
+      reason: sceneRaw && scriptRes ? null : "Missing scene/script path for script reference check.",
+    });
+  }
+
+  if (action === "rename_project" || expectations.requires_project_settings_update === true) {
+    const projectFile = path.resolve(root, "project.godot");
+    const raw = fs.existsSync(projectFile) ? fs.readFileSync(projectFile, "utf-8") : "";
+    const expectedName = safeString(params.project_name).trim();
+    checks.push({
+      expectation: "project_name_updated",
+      pass: Boolean(expectedName && raw.includes(`config/name="${expectedName}"`)),
+      evidence: { expected_project_name: expectedName },
+      reason: expectedName ? null : "Missing project_name param.",
+    });
+  }
+
+  if (action === "get_debug_output" || expectations.requires_non_null_response === true) {
+    const hasDebugOutput =
+      isPlainObject(result.output) ||
+      (isPlainObject(runtimeResult?.output) && (runtimeResult.output.stdout || runtimeResult.output.stderr));
+    checks.push({
+      expectation: "debug_output_available",
+      pass: Boolean(hasDebugOutput),
+      evidence: { operation: action },
+      reason: hasDebugOutput ? null : "No debug output evidence found.",
+    });
+  }
+
+  if (action === "run_project") {
+    checks.push({
+      expectation: "runtime_result_ok",
+      pass: Boolean(runtimeResult?.ok || result?.ok),
+      evidence: { runtime_ok: Boolean(runtimeResult?.ok), operation_ok: Boolean(result?.ok) },
+      reason: null,
+    });
+  }
+
+  return checks;
+}
+
+function parseSceneRootNode(sceneRaw) {
+  const m = String(sceneRaw ?? "").match(/\[node\s+name="([^"]+)"\s+type="([^"]+)"/);
+  if (!m) return null;
+  return { name: m[1] ?? null, type: m[2] ?? null };
+}
+
+function normalizeProjectRelativePath(input) {
+  const p = String(input ?? "").trim();
+  if (!p) return null;
+  if (p.startsWith("res://")) return p.replace(/^res:\/\//, "");
+  return p.replace(/^\.?\//, "");
+}
+
+function toResPath(input) {
+  const p = String(input ?? "").trim();
+  if (!p) return null;
+  if (p.startsWith("res://")) return p;
+  return `res://${p.replace(/^\.?\//, "")}`;
+}
+
+function renderExpectationDetails(item) {
+  return JSON.stringify({
+    expectation: item.expectation,
+    pass: item.pass,
+    evidence: item.evidence ?? {},
+    reason: item.reason ?? null,
+  });
 }
 
 function runPresenceChecks({ root, recipe, checks, errors }) {

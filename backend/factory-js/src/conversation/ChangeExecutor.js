@@ -14,7 +14,7 @@
  * by `ChangePlanner` (or a compatible plan producer).
  */
 
-import { validateProject } from "../validation/Validator.js";
+import { validateProject } from "../validation/validator.js";
 import { updateProjectGodotProjectName } from "./ProjectMetadataUpdater.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -225,6 +225,17 @@ function getExecutorMethodForMcpAction(executor, action) {
   if (!executor || !action) return null;
   const name = String(action);
 
+  // Canonical handoff contract:
+  // ChangeExecutor should pass one object shape to executor boundary:
+  // { action: "<canonical_action>", params: { ...canonical_params } }
+  // This prevents snake_case params from being dropped by legacy method signatures.
+  if (typeof executor.executeOperation === "function") {
+    return {
+      fn: (params) => executor.executeOperation({ action: name, params }),
+      method: "executeOperation",
+    };
+  }
+
   if (typeof executor[name] === "function") return { fn: executor[name], method: name };
 
   // Expected action naming convention (snake_case) in plans.
@@ -257,6 +268,41 @@ function getExecutorMethodForMcpAction(executor, action) {
   return null;
 }
 
+function normalizeMcpActionName(action) {
+  const a = safeString(action).trim();
+  const aliases = {
+    createScene: "create_scene",
+    addNode: "add_node",
+    saveScene: "save_scene",
+    attachScript: "attach_script",
+  };
+  return aliases[a] ?? a;
+}
+
+function toCapabilityOperationKey(action) {
+  const normalized = normalizeMcpActionName(action);
+  if (normalized === "attach_script") return "attach_script_to_scene_root";
+  return normalized;
+}
+
+async function resolveSupportedMcpActionSet(executor) {
+  if (!executor || typeof executor.getSupportedOperations !== "function") return null;
+  try {
+    const res = await executor.getSupportedOperations();
+    if (!res?.ok) return null;
+    const ops = Array.isArray(res?.output?.operations) ? res.output.operations : [];
+    const enabled = ops.filter((o) => o?.enabled).map((o) => safeString(o?.operation).trim()).filter(Boolean);
+    const rawTools = Array.isArray(res?.output?.raw_tools) ? res.output.raw_tools : [];
+    return {
+      enabledActionSet: new Set(enabled),
+      discoveredRawTools: rawTools,
+      supportedOperations: ops,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function maybeAwait(value) {
   return value && typeof value.then === "function" ? value : value;
 }
@@ -270,6 +316,82 @@ function extractCliActionArgs(actionObj) {
     null;
 
   return { cliArgs: Array.isArray(cliArgs) ? cliArgs : [], timeoutSeconds };
+}
+
+function prettyForLog(value) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function validateMcpActionArgs(action, params) {
+  const p = isPlainObject(params) ? params : {};
+  const get = (...keys) => {
+    for (const key of keys) {
+      if (p[key] != null) return p[key];
+    }
+    return null;
+  };
+  const errors = [];
+  if (action === "create_scene") {
+    if (!isNonEmptyString(get("scene_path", "scenePath"))) errors.push("scene_path is required");
+    if (!isNonEmptyString(get("root_node_name", "rootName", "root_name"))) errors.push("root_node_name is required");
+    if (!isNonEmptyString(get("root_node_type", "rootType", "root_type"))) errors.push("root_node_type is required");
+  } else if (action === "add_node") {
+    if (!isNonEmptyString(get("scene_path", "scenePath"))) errors.push("scene_path is required");
+    if (!isNonEmptyString(get("node_name", "nodeName"))) errors.push("node_name is required");
+    if (!isNonEmptyString(get("node_type", "nodeType"))) errors.push("node_type is required");
+  } else if (action === "save_scene") {
+    if (!isNonEmptyString(get("scene_path", "scenePath"))) errors.push("scene_path is required");
+  } else if (action === "attach_script") {
+    if (!isNonEmptyString(get("scene_path", "scenePath"))) errors.push("scene_path is required");
+    if (!isNonEmptyString(get("script_path", "scriptPath"))) errors.push("script_path is required");
+  }
+  return {
+    ok: errors.length === 0,
+    errors,
+    error: errors.length ? `Invalid ${action} arguments: ${errors.join(", ")}` : null,
+  };
+}
+
+function sanitizeCanonicalMcpParams(action, rawParams) {
+  const p = isPlainObject(rawParams) ? { ...rawParams } : {};
+  // Canonical boundary: map legacy aliases into canonical fields, then drop aliases
+  // so executor handoff is stable and registry-aligned.
+  if (action === "create_scene") {
+    if (p.scene_path == null && p.path != null) p.scene_path = p.path;
+    if (p.root_node_name == null && p.root_name != null) p.root_node_name = p.root_name;
+    if (p.root_node_type == null && p.root_type != null) p.root_node_type = p.root_type;
+    if (p.root_node_name == null && p.rootName != null) p.root_node_name = p.rootName;
+    if (p.root_node_type == null && p.rootType != null) p.root_node_type = p.rootType;
+    delete p.path;
+    delete p.root_name;
+    delete p.root_type;
+    delete p.rootName;
+    delete p.rootType;
+    delete p.scenePath;
+  } else if (action === "add_node") {
+    if (p.scene_path == null && p.path != null) p.scene_path = p.path;
+    delete p.path;
+    delete p.scenePath;
+  } else if (action === "save_scene") {
+    if (p.scene_path == null && p.path != null) p.scene_path = p.path;
+    delete p.path;
+    delete p.scenePath;
+  } else if (action === "attach_script" || action === "attach_script_to_scene_root") {
+    if (p.scene_path == null && p.path != null) p.scene_path = p.path;
+    if (p.script_path == null && p.scriptPath != null) p.script_path = p.scriptPath;
+    delete p.path;
+    delete p.scenePath;
+    delete p.scriptPath;
+  }
+  return p;
 }
 
 async function applySourceOfTruthUpdates({ sourceOfTruthManager, plan }) {
@@ -331,6 +453,60 @@ function extractPlannedFileChanges(plan) {
   return fileChanges.filter((fc) => fc && isPlainObject(fc) && fc.path);
 }
 
+function isSceneLikeFileChange(fc, relPath) {
+  const rel = safeString(relPath).trim().toLowerCase();
+  const notes = safeString(fc?.notes).trim().toLowerCase();
+  return rel.endsWith(".tscn") || rel.includes("scene") || notes.includes("scene");
+}
+
+function shouldDeferFileChangeToActionPath({ fileChange, relPath, hasExecutableActionPath }) {
+  if (!hasExecutableActionPath) return false;
+  const type = safeString(fileChange?.type).trim().toLowerCase();
+  if (!["edit", "modify", "scene_attach_script", "scene_node_update"].includes(type)) return false;
+  return isSceneLikeFileChange(fileChange, relPath);
+}
+
+function looksLikeRawSceneCreateFileChange(fileChange) {
+  const fc = isPlainObject(fileChange) ? fileChange : {};
+  const type = safeString(fc?.type).trim().toLowerCase();
+  const relPath = safeString(fc?.path).trim().toLowerCase();
+  const notes = safeString(fc?.notes).trim().toLowerCase();
+  const isSceneFile = relPath.endsWith(".tscn") || relPath.includes("scene");
+  if (!isSceneFile) return false;
+  const creationType = ["create_scene", "scene_create", "create", "add", "script_create"].includes(type);
+  const noteHint = notes.includes("create scene") || notes.includes("new scene") || notes.includes("scene create");
+  return creationType || noteHint;
+}
+
+function hasCreateSceneMcpAction(plan) {
+  const actions = Array.isArray(plan?.required_mcp_actions)
+    ? plan.required_mcp_actions
+    : Array.isArray(plan?.mcp_actions)
+      ? plan.mcp_actions
+      : [];
+  return actions.some((a) => normalizeMcpActionName(a?.action) === "create_scene");
+}
+
+function detectInvalidSceneCreatePlanningShape({ plan, supportedActionSet }) {
+  const createSceneSupported = Boolean(supportedActionSet && supportedActionSet.has("create_scene"));
+  if (!createSceneSupported) return null;
+  if (hasCreateSceneMcpAction(plan)) return null;
+
+  const fileChanges = extractPlannedFileChanges(plan);
+  const offenders = fileChanges.filter((fc) => looksLikeRawSceneCreateFileChange(fc));
+  if (offenders.length === 0) return null;
+
+  return {
+    error:
+      "Invalid planning shape: raw .tscn scene creation in file_changes while MCP create_scene is supported. Use mcp_actions.create_scene.",
+    offenders: offenders.map((fc) => ({
+      type: safeString(fc?.type),
+      path: safeString(fc?.path),
+      notes: safeString(fc?.notes),
+    })),
+  };
+}
+
 async function applyFileMutations({ workspace, sourceOfTruthManager, plan }) {
   const projectRoot = extractProjectRootAndValidate(workspace);
   const affected = Array.isArray(plan?.affected_project_files) ? plan.affected_project_files : [];
@@ -340,7 +516,13 @@ async function applyFileMutations({ workspace, sourceOfTruthManager, plan }) {
     : Array.isArray(plan?.mcp_actions)
       ? plan.mcp_actions
       : [];
+  const cliActions = Array.isArray(plan?.required_cli_actions)
+    ? plan.required_cli_actions
+    : Array.isArray(plan?.cli_actions)
+      ? plan.cli_actions
+      : [];
   const hasMcpAttachScript = mcpActions.some((a) => a && a.action === "attach_script");
+  const hasExecutableActionPath = mcpActions.length > 0 || cliActions.length > 0;
 
   const hasAnyMutationIntent = affected.length > 0 || fileChanges.length > 0;
   if (!hasAnyMutationIntent) return { ok: true, mutations: [], file_change_results: [], skipped: true };
@@ -421,8 +603,43 @@ async function applyFileMutations({ workspace, sourceOfTruthManager, plan }) {
         continue;
       }
 
-      // Unknown file_changes type: fail loudly instead of silently succeeding.
-      throw new Error(`Unsupported file_changes.type: ${type}`);
+      if (shouldDeferFileChangeToActionPath({ fileChange: fc, relPath: rel, hasExecutableActionPath })) {
+        // Scene mutations are MCP-driven here; avoid failing at file mutation stage
+        // when planner emits generic scene edit/modify placeholders.
+        // eslint-disable-next-line no-console
+        console.log(
+          `[ChangeExecutor] file_change deferred to MCP/CLI: type=${type} path=${rel}`
+        );
+        fileChangeResults.push({
+          type,
+          path: rel,
+          ok: true,
+          skipped: true,
+          deferred_to_actions: true,
+          reason: `Scene ${type} entry deferred; mutation expected via mcp_actions/cli_actions.`,
+        });
+        continue;
+      }
+
+      if (hasExecutableActionPath) {
+        // Do not fail early when actionable MCP/CLI path exists; record explicit skip.
+        // eslint-disable-next-line no-console
+        console.log(
+          `[ChangeExecutor] file_change unsupported but execution will continue: type=${type} path=${rel}`
+        );
+        fileChangeResults.push({
+          type,
+          path: rel,
+          ok: true,
+          skipped: true,
+          unsupported: true,
+          reason: "Unsupported file_changes.type; deferred to mcp_actions/cli_actions.",
+        });
+        continue;
+      }
+
+      // No executable path remains for this mutation intent.
+      throw new Error(`Unsupported file_changes.type with no MCP/CLI fallback: ${type}`);
     } catch (err) {
       errors.push({ file_change: fc?.path, error: safeString(err?.message ?? err) });
       fileChangeResults.push({ type: fc?.type, path: fc?.path, ok: false, error: safeString(err?.message ?? err) });
@@ -437,10 +654,59 @@ async function applyMcpActions({ executor, plan }) {
   const mcpActions = Array.isArray(plan?.required_mcp_actions) ? plan.required_mcp_actions : [];
   const results = [];
   const errors = [];
+  const capabilitySnapshot = await resolveSupportedMcpActionSet(executor);
+  const supportedActionSet = capabilitySnapshot?.enabledActionSet ?? null;
+  if (supportedActionSet) {
+    // eslint-disable-next-line no-console
+    console.log(`[ChangeExecutor] discovered GoPeak capabilities`, {
+      discovered_raw_tool_count: Array.isArray(capabilitySnapshot?.discoveredRawTools)
+        ? capabilitySnapshot.discoveredRawTools.length
+        : 0,
+      enabled_operations: Array.from(supportedActionSet),
+    });
+  }
 
   for (const actionObj of mcpActions) {
-    const action = actionObj?.action;
-    const params = actionObj?.params ?? {};
+    // Boundary trace: this is the raw canonical action object before handoff.
+    // eslint-disable-next-line no-console
+    console.log("[ChangeExecutor] canonical handoff raw action object", prettyForLog(actionObj));
+    const action = normalizeMcpActionName(actionObj?.action);
+    const capabilityKey = toCapabilityOperationKey(action);
+    const rawParams = actionObj?.params ?? {};
+    const params = sanitizeCanonicalMcpParams(action, rawParams);
+    // eslint-disable-next-line no-console
+    console.log("[ChangeExecutor] canonical handoff cleaned action object", prettyForLog({
+      action,
+      params,
+    }));
+    const argValidation = validateMcpActionArgs(action, params);
+    if (!argValidation.ok) {
+      errors.push({
+        action,
+        capability: capabilityKey,
+        error: argValidation.error,
+        invalid_args: argValidation.errors,
+        local_validation: true,
+      });
+      // eslint-disable-next-line no-console
+      console.log("[ChangeExecutor] invalid MCP action args rejected before execution", {
+        action,
+        capability_key: capabilityKey,
+        errors: argValidation.errors,
+        params,
+      });
+      return { ok: false, errors, results };
+    }
+    if (supportedActionSet && !supportedActionSet.has(capabilityKey)) {
+      const msg = `Unsupported MCP action for current GoPeak toolset: ${safeString(action)} (capability=${capabilityKey})`;
+      errors.push({ action, capability: capabilityKey, error: msg, unsupported: true });
+      // eslint-disable-next-line no-console
+      console.log(`[ChangeExecutor] unsupported action rejected`, {
+        requested_action: action,
+        capability_key: capabilityKey,
+      });
+      return { ok: false, errors, results };
+    }
     const method = getExecutorMethodForMcpAction(executor, action);
 
     if (!method) {
@@ -458,15 +724,31 @@ async function applyMcpActions({ executor, plan }) {
             : "mcp_action";
       // eslint-disable-next-line no-console
       console.log(`[ChangeExecutor] ${stepName} start: ${action}`);
+      // eslint-disable-next-line no-console
+      console.log(
+        `[ChangeExecutor] ${stepName} request`,
+        prettyForLog({
+          raw_action_object: actionObj,
+          cleaned_canonical_action_object: { action, params },
+          requested_action: action,
+          capability_key: capabilityKey,
+          resolved_method: method.method,
+          params,
+        })
+      );
       const res = await maybeAwait(method.fn(params));
+      // eslint-disable-next-line no-console
+      console.log(`[ChangeExecutor] ${stepName} raw/normalized response`, prettyForLog(res));
       results.push({ action: method.method, requested_action: action, result: res });
       if (res && res.ok === false) {
+        const mcpTrace = isPlainObject(res?.output) ? res.output?.mcp_trace ?? null : null;
         errors.push({
           action,
           error: res.error ?? "Unknown MCP failure",
           timed_out: Boolean(res?.output?.timed_out),
           timeout_ms: res?.output?.timeout_ms ?? null,
           executor_result: res,
+          mcp_trace: mcpTrace,
         });
         // eslint-disable-next-line no-console
         console.log(`[ChangeExecutor] ${stepName} failed: ${action}`);
@@ -475,14 +757,24 @@ async function applyMcpActions({ executor, plan }) {
       // eslint-disable-next-line no-console
       console.log(`[ChangeExecutor] ${stepName} done: ${action}`);
     } catch (err) {
+      const errMessage = safeString(err?.message ?? err);
+      const errStack = typeof err?.stack === "string" ? err.stack : null;
       errors.push({
         action,
-        error: safeString(err?.message ?? err),
+        error: errMessage,
         timed_out: err?.code === "ETIMEDOUT" || err?.timeoutMs != null,
         timeout_ms: err?.timeoutMs ?? null,
+        exception: {
+          message: errMessage,
+          stack: errStack,
+          code: err?.code ?? null,
+        },
       });
       // eslint-disable-next-line no-console
-      console.log(`[ChangeExecutor] mcp_action exception: ${action}`);
+      console.log(
+        `[ChangeExecutor] mcp_action exception: ${action}`,
+        prettyForLog({ message: errMessage, code: err?.code ?? null, stack: errStack })
+      );
       return { ok: false, errors, results };
     }
   }
@@ -666,6 +958,8 @@ export async function executeChangePlan({
   const errors = [];
   const stageResults = {};
   const step_trace = [];
+  const capabilitySnapshot = await resolveSupportedMcpActionSet(executor);
+  const supportedActionSet = capabilitySnapshot?.enabledActionSet ?? null;
 
   function beginStepTrace(step) {
     const startedAt = Date.now();
@@ -687,6 +981,7 @@ export async function executeChangePlan({
   }
 
   function failWithStep({ failed_step, timeout_info, error, execution, validation_result, errors, created_files, modified_files }) {
+    const mcp_debug = failed_step === "mcp_actions" ? execution?.mcp ?? stageResults?.mcp ?? null : null;
     return {
       ok: false,
       error: error ?? "Change execution failed.",
@@ -697,6 +992,7 @@ export async function executeChangePlan({
       validation_result: validation_result ?? stageResults.validation,
       created_files: created_files ?? [],
       modified_files: modified_files ?? [],
+      ...(mcp_debug != null ? { mcp_debug } : {}),
       step_trace,
     };
   }
@@ -746,6 +1042,31 @@ export async function executeChangePlan({
   const projectRoot = extractProjectRootAndValidate(normalizedWorkspace);
   const mutationTargets = buildMutationTargetsFromPlan(plan);
   const shouldGateOnProjectMutation = planIndicatesProjectMutation(plan) && mutationTargets.length > 0;
+
+  const invalidSceneCreateShape = detectInvalidSceneCreatePlanningShape({
+    plan,
+    supportedActionSet,
+  });
+  if (invalidSceneCreateShape) {
+    // Guardrail: prevent executor from attempting raw scene-file creation when
+    // discovery says MCP create_scene is available. This catches planner-shape drift early.
+    // eslint-disable-next-line no-console
+    console.log("[ChangeExecutor] invalid scene-creation plan shape rejected", prettyForLog(invalidSceneCreateShape));
+    return failWithStep({
+      failed_step: "planning_shape_guard",
+      error: invalidSceneCreateShape.error,
+      execution: stageResults,
+      errors: [
+        {
+          stage: "planning_shape_guard",
+          error: invalidSceneCreateShape.error,
+          offenders: invalidSceneCreateShape.offenders,
+        },
+      ],
+      created_files: [],
+      modified_files: [],
+    });
+  }
 
   const preSnapshots = {};
   if (projectRoot && mutationTargets.length > 0) {

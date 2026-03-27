@@ -26,6 +26,7 @@ import readline from "node:readline";
 import path from "node:path";
 
 import { GodotExecutor } from "../godot/GodotExecutor.js";
+import { getGoPeakSessionManager } from "../godot/GoPeakSessionManager.js";
 import { loadProjectWorkspace } from "./ProjectLoader.js";
 import { SourceOfTruthManager } from "./SourceOfTruthManager.js";
 import { ConversationSession } from "./ConversationSession.js";
@@ -52,14 +53,93 @@ function printEvent(event) {
   }
 }
 
-function resolveExecutor({ projectRoot, godotCliPath = "godot" }) {
-  // MCP client is optional; this terminal runner focuses on v1 executor+CLI.
+function resolveExecutor({ projectRoot, godotCliPath = "godot", sessionManager = null }) {
+  // Create one executor for whole session so MCP stdio process is reused.
   return new GodotExecutor({
     projectRoot,
     mcpClient: null,
     godotCliPath,
     defaultHeadless: true,
+    sessionManager: sessionManager ?? getGoPeakSessionManager(),
   });
+}
+
+async function ensureEditModeBridgeReady({ executor, sessionManager, expectedProjectRoot }) {
+  // Bridge-sensitive workflows should wait on the backend-owned GoPeak session.
+  if (sessionManager && typeof sessionManager.waitForBridgeReady === "function") {
+    const warmup = await sessionManager.waitForBridgeReady(expectedProjectRoot, {
+      timeoutMs: 60_000,
+      pollMs: 2_000,
+    });
+    // eslint-disable-next-line no-console
+    console.log("[TerminalEditModeRunner] shared-session bridge warmup", warmup);
+    return {
+      ok: Boolean(warmup?.ok),
+      output: {
+        isBridgeReady: Boolean(warmup?.isBridgeReady),
+        connectedProjectPath: warmup?.connectedProjectPath ?? null,
+        projectMatches: Boolean(warmup?.projectMatches),
+      },
+      error: warmup?.error ?? null,
+    };
+  }
+  if (!executor || typeof executor.waitForBridgeReady !== "function") {
+    return { ok: true, skipped: true };
+  }
+  const warmup = await executor.waitForBridgeReady({
+    expectedProjectRoot,
+    timeoutMs: 60_000,
+    pollMs: 2_000,
+  });
+  // eslint-disable-next-line no-console
+  console.log("[TerminalEditModeRunner] bridge warmup", {
+    ok: warmup?.ok ?? false,
+    isBridgeReady: warmup?.output?.isBridgeReady ?? false,
+    connectedProjectPath: warmup?.output?.connectedProjectPath ?? null,
+    expectedProjectRoot,
+    projectMatches: warmup?.output?.projectMatches ?? false,
+  });
+  return warmup;
+}
+
+async function verifyBridgeBeforeRequest({ executor, sessionManager, expectedProjectRoot }) {
+  if (sessionManager && typeof sessionManager.waitForBridgeReady === "function") {
+    const gate = await sessionManager.waitForBridgeReady(expectedProjectRoot, {
+      timeoutMs: 1_000,
+      pollMs: 250,
+    });
+    const connected = await sessionManager.getConnectedProjectPath();
+    // eslint-disable-next-line no-console
+    console.log("[TerminalEditModeRunner] shared-session bridge request gate", {
+      ok: gate?.ok ?? false,
+      isBridgeReady: gate?.isBridgeReady ?? false,
+      connectedProjectPath: connected ?? gate?.connectedProjectPath ?? null,
+      expectedProjectRoot,
+      projectMatches: gate?.projectMatches ?? false,
+    });
+    return {
+      ok: Boolean(gate?.ok),
+      output: {
+        isBridgeReady: Boolean(gate?.isBridgeReady),
+        connectedProjectPath: connected ?? gate?.connectedProjectPath ?? null,
+        projectMatches: Boolean(gate?.projectMatches),
+      },
+      error: gate?.error ?? null,
+    };
+  }
+  if (!executor || typeof executor.getBridgeStatus !== "function") {
+    return { ok: true, skipped: true };
+  }
+  const status = await executor.getBridgeStatus({ expectedProjectRoot });
+  // eslint-disable-next-line no-console
+  console.log("[TerminalEditModeRunner] bridge request gate", {
+    ok: status?.ok ?? false,
+    isBridgeReady: status?.output?.isBridgeReady ?? false,
+    connectedProjectPath: status?.output?.connectedProjectPath ?? null,
+    expectedProjectRoot,
+    projectMatches: status?.output?.projectMatches ?? false,
+  });
+  return status;
 }
 
 function normalizeArgs(argv) {
@@ -160,6 +240,7 @@ export async function runTerminalEditMode({
   modelName = "gpt-oss-20b",
 
   executor = null,
+  sessionManager = null,
   validator = null,
   onEvent = null,
 } = {}) {
@@ -172,9 +253,42 @@ export async function runTerminalEditMode({
     runId,
   });
 
+  const resolvedSessionManager = sessionManager ?? getGoPeakSessionManager();
+  if (resolvedSessionManager && typeof resolvedSessionManager.ensureStarted === "function") {
+    const started = await resolvedSessionManager.ensureStarted();
+    // eslint-disable-next-line no-console
+    console.log("[TerminalEditModeRunner] backend-owned GoPeak session", {
+      reused_existing_session: started?.reused ?? null,
+    });
+  }
   const resolvedExecutor =
     executor ??
-    resolveExecutor({ projectRoot: workspaceRes.project_root, godotCliPath });
+    resolveExecutor({ projectRoot: workspaceRes.project_root, godotCliPath, sessionManager: resolvedSessionManager });
+  const executorSessionId = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const mcpSessionInfo =
+    typeof resolvedExecutor.getMcpSessionInfo === "function"
+      ? resolvedExecutor.getMcpSessionInfo()
+      : null;
+
+  console.log(`[TerminalEditModeRunner] executor session initialized: ${executorSessionId}`);
+  if (mcpSessionInfo) {
+    console.log("[TerminalEditModeRunner] GoPeak session mode", {
+      shared_session_enabled: mcpSessionInfo.shared_enabled ?? null,
+      reused_existing_session: mcpSessionInfo.reused ?? false,
+      session_key: mcpSessionInfo.key ?? null,
+      has_mcp_client: mcpSessionInfo.has_mcp_client ?? false,
+    });
+  }
+  const warmup = await ensureEditModeBridgeReady({
+    executor: resolvedExecutor,
+    sessionManager: resolvedSessionManager,
+    expectedProjectRoot: workspaceRes.project_root,
+  });
+  if (!warmup?.ok) {
+    throw new Error(
+      `Bridge readiness failed before edit loop. isBridgeReady=${warmup?.output?.isBridgeReady ?? false} connected=${warmup?.output?.connectedProjectPath ?? "unknown"} expected=${workspaceRes.project_root}`
+    );
+  }
 
   console.log(`Opened project: ${workspaceRes.normalizedGameSpec?.project_name ?? workspaceRes.normalized_game_spec?.project_name ?? "unknown"} `);
   console.log("Type `help` for commands.");
@@ -231,6 +345,18 @@ export async function runTerminalEditMode({
 
     // Normal edit request: planner -> executor -> validation.
     // We rely on ProjectConversationOrchestrator to handle sequencing.
+    const bridgeStatus = await verifyBridgeBeforeRequest({
+      executor: resolvedExecutor,
+      sessionManager: resolvedSessionManager,
+      expectedProjectRoot: workspaceRes.project_root,
+    });
+    if (!bridgeStatus?.ok) {
+      console.log(
+        `Edit REJECTED: bridge not ready or project mismatch. isBridgeReady=${bridgeStatus?.output?.isBridgeReady ?? false} connected=${bridgeStatus?.output?.connectedProjectPath ?? "unknown"} expected=${workspaceRes.project_root}`
+      );
+      continue;
+    }
+
     console.log("Planning + executing edit...");
 
     const events = [];

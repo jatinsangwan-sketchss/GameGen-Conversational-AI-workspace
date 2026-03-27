@@ -157,11 +157,85 @@ export async function runProjectConversationEdit({
     source_of_truth_dir: workspaceRes.source_of_truth_dir,
   });
 
+  // Discovery-first edit mode gating:
+  // before planning/execution, verify editor bridge readiness and project binding.
+  if (executor && typeof executor.getBridgeStatus === "function") {
+    try {
+      const bridge = await executor.getBridgeStatus({ expectedProjectRoot: workspaceRes.project_root });
+      debug("bridge_status", "Bridge status fetched", {
+        isBridgeReady: bridge?.output?.isBridgeReady ?? false,
+        connected_project_path: bridge?.output?.connectedProjectPath ?? null,
+        expected_project_path: workspaceRes.project_root,
+        project_matches: bridge?.output?.projectMatches ?? false,
+      });
+      if (!bridge?.ok) {
+        error("bridge_status", "Bridge is not ready for requested project", bridge?.error, {
+          bridge_status: bridge?.output ?? null,
+        });
+        return {
+          ok: false,
+          error: bridge?.error ?? "Bridge readiness check failed.",
+          errors: [{ stage: "bridge_status", error: bridge?.error ?? "bridge_not_ready" }],
+          workspace: workspaceRes,
+          stageResults: { load_workspace: workspaceRes, bridge_status: bridge },
+          stageTimings,
+        };
+      }
+    } catch (err) {
+      error("bridge_status", "Bridge status check threw exception", err);
+      return {
+        ok: false,
+        error: safeString(err?.message ?? err),
+        errors: [{ stage: "bridge_status", error: safeString(err?.message ?? err) }],
+        workspace: workspaceRes,
+        stageResults: { load_workspace: workspaceRes },
+        stageTimings,
+      };
+    }
+  }
+
   // -----------------------------
   // Stage 2: Plan the change (no mutation here)
   // -----------------------------
   const planTimer = beginTimer();
   progress("plan_change", "Planning conversational edit");
+
+  let supportedOperations = null;
+  let discoveredRawTools = null;
+  if (executor && typeof executor.getSupportedOperations === "function") {
+    try {
+      const supportedRes = await executor.getSupportedOperations();
+      if (supportedRes?.ok) {
+        supportedOperations = supportedRes?.output?.operations ?? [];
+        discoveredRawTools = supportedRes?.output?.raw_tools ?? supportedRes?.output?.tools ?? [];
+        debug("discover_supported_operations", "Supported GoPeak operations loaded", {
+          discovered_raw_tool_count: Array.isArray(discoveredRawTools) ? discoveredRawTools.length : 0,
+          enabled: supportedOperations.filter((o) => o?.enabled).map((o) => o?.operation),
+          disabled: supportedOperations.filter((o) => !o?.enabled).map((o) => o?.operation),
+        });
+      } else {
+        error("discover_supported_operations", "Failed to load supported operations", supportedRes?.error);
+        return {
+          ok: false,
+          error: supportedRes?.error ?? "Failed to discover supported operations.",
+          errors: [{ stage: "discover_supported_operations", error: supportedRes?.error ?? "unsupported_discovery" }],
+          workspace: workspaceRes,
+          stageResults: { load_workspace: workspaceRes, discover_supported_operations: supportedRes },
+          stageTimings,
+        };
+      }
+    } catch (err) {
+      error("discover_supported_operations", "Failed to load supported operations", err);
+      return {
+        ok: false,
+        error: safeString(err?.message ?? err),
+        errors: [{ stage: "discover_supported_operations", error: safeString(err?.message ?? err) }],
+        workspace: workspaceRes,
+        stageResults: { load_workspace: workspaceRes },
+        stageTimings,
+      };
+    }
+  }
 
   const planRes = await planChange({
     workspace: {
@@ -178,6 +252,7 @@ export async function runProjectConversationEdit({
     modelName,
     boundedValidationSeconds,
     strictValidation: strictValidation,
+    supportedOperations,
   });
 
   stageTimings.plan_change = endTimer(planTimer);
@@ -197,6 +272,9 @@ export async function runProjectConversationEdit({
   debug("plan_change", "Change plan created", {
     intent_summary: planRes.plan?.intent_summary ?? null,
     affected_project_files: planRes.plan?.affected_project_files ?? [],
+    planned_mcp_actions: Array.isArray(planRes.plan?.mcp_actions)
+      ? planRes.plan.mcp_actions.map((a) => a?.action).filter(Boolean)
+      : [],
   });
 
   // -----------------------------

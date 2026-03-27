@@ -1,12 +1,13 @@
 {
   "godot": {
-    "command": "npx",
-    "args": [
-      "/Users/ishanharshaddiwekar/GodotProjects/godot-mcp/mcp-server/dist/index.js"
-    ],
+    "command": "node",
+    "args": ["/Users/ishanharshaddiwekar/GodotProjects/Gopeak-godot-mcp/build/index.js"],
     "env": {
-      "DEBUG": "true"
+      "GODOT_PATH": "godot",
+      "GOPEAK_TOOL_PROFILE": "full",
+      "GOPEAK_TOOLS_PAGE_SIZE": "200",
+      "DEBUG": "false"
     },
-    "working_directory": null
+    "working_directory": "/Users/ishanharshaddiwekar/GodotProjects/Gopeak-godot-mcp"
   }
 }
