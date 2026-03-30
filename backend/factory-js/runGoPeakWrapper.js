@@ -16,17 +16,10 @@
  */
 
 import path from "node:path";
-import { GodotExecutor } from "./src/godot/GodotExecutor.js";
-import { normalizeRawTools, deriveSupportedOperations } from "./src/godot/GoPeakToolCatalog.js";
-import {
-  explainSkipReason,
-} from "./src/godot/GoPeakPrerequisiteResolver.js";
-import { getGoPeakSessionManager } from "./src/godot/GoPeakSessionManager.js";
-import {
-  getAllOperationDefinitions,
-  getOperationPrerequisites,
-  getOperationPlaceholderPolicy,
-} from "./src/godot/GoPeakOperationRegistry.js";
+import { GodotExecutor } from "./core/godot/GodotExecutor.js";
+import { RecipeEngine, SUPPORTED_RECIPES } from "./core/RecipeEngine.js";
+import { getGoPeakSessionManager } from "./core/godot/GoPeakSessionManager.js";
+import { GOPEAK_DISCOVERY_DEBUG } from "./core/godot/GoPeakDebugFlags.js";
 
 function parseArgs(argv) {
   const args = Array.isArray(argv) ? argv : [];
@@ -47,270 +40,212 @@ function usage() {
   console.log("  node ./factory-js/runGoPeakWrapper.js --test-all [--project-root <path>] [--allow-mutating-tools]");
 }
 
-function summarizeArgs(args) {
-  if (!args || typeof args !== "object") return "(none)";
-  const keys = Object.keys(args);
-  if (keys.length === 0) return "{}";
-  const out = {};
-  for (const k of keys) {
-    const v = args[k];
-    if (typeof v === "string" && v.length > 120) out[k] = `${v.slice(0, 117)}...`;
-    else out[k] = v;
-  }
-  return JSON.stringify(out);
-}
-
 function safeError(err) {
   if (err?.message) return String(err.message);
   return String(err ?? "Unknown error");
 }
 
-function hasPrerequisites(prereqs, ctx) {
-  const reqs = Array.isArray(prereqs) ? prereqs : [];
-  for (const p of reqs) {
-    if (p === "server_only") continue;
-    if (p === "project_required" && !ctx.projectRoot) return false;
-    if (p === "editor_bridge_required" && !ctx.bridgeReady) return false;
-    if (p === "runtime_addon_required" && !ctx.runtimeAddonReady) return false;
-    if (p === "lsp_required" && !ctx.lspReady) return false;
-    if (p === "dap_required" && !ctx.dapReady) return false;
+const PROTOTYPE_SCENE_PATH = "res://scenes/wrapper_test_scene.tscn";
+const PROTOTYPE_ROOT_NODE_NAME = "WrapperTestRoot";
+const PROTOTYPE_ROOT_NODE_TYPE = "Node2D";
+const PROTOTYPE_NODE_NAME = "WrapperNode";
+const PROTOTYPE_NODE_TYPE = "Node2D";
+const PROTOTYPE_NODE_PATH = ".";
+const PROTOTYPE_SCRIPT_PATH = "scripts/WrapperGenerated.gd";
+
+function buildPrototypeOperationParams(operation) {
+  // Canonical params for RecipeEngine + GodotExecutor.
+  // This wrapper validates the prototype operation layer, not raw tools.
+  switch (operation) {
+    case "inspect_scene":
+      return { scene_path: PROTOTYPE_SCENE_PATH };
+    case "create_scene":
+      return {
+        scene_path: PROTOTYPE_SCENE_PATH,
+        root_node_name: PROTOTYPE_ROOT_NODE_NAME,
+        root_node_type: PROTOTYPE_ROOT_NODE_TYPE,
+      };
+    case "add_node":
+      return {
+        scene_path: PROTOTYPE_SCENE_PATH,
+        node_name: PROTOTYPE_NODE_NAME,
+        node_type: PROTOTYPE_NODE_TYPE,
+        parent_path: PROTOTYPE_NODE_PATH,
+      };
+    case "set_node_properties":
+      return {
+        scene_path: PROTOTYPE_SCENE_PATH,
+        node_path: PROTOTYPE_NODE_PATH,
+        properties: { visible: true },
+      };
+    case "save_scene":
+      return { scene_path: PROTOTYPE_SCENE_PATH };
+    case "create_script_file":
+      return {
+        script_path: PROTOTYPE_SCRIPT_PATH,
+        content: "extends Node\n\nfunc _ready():\n\tprint(\"wrapper generated\")\n",
+      };
+    default:
+      return {};
   }
-  return true;
 }
 
-function buildCanonicalOperationParams({ operation, projectRoot, placeholderPolicy }) {
-  const defaultScene = "res://scenes/boot/boot_scene.tscn";
-  const defaultScript = "res://scripts/BootPrintHelloWorld.gd";
-  const defaults = {
-    analyze_project: {},
-    create_scene: {
-      scene_path: "res://scenes/wrapper_test_scene.tscn",
-      root_node_name: "WrapperTestRoot",
-      root_node_type: "Node2D",
-    },
-    add_node: {
-      scene_path: defaultScene,
-      node_name: "WrapperNode",
-      node_type: "Node2D",
-      parent_path: ".",
-    },
-    set_node_properties: {
-      scene_path: defaultScene,
-      node_path: ".",
-      properties: { visible: true },
-    },
-    save_scene: {
-      scene_path: defaultScene,
-    },
-    attach_script_to_scene_root: {
-      scene_path: defaultScene,
-      node_path: ".",
-      script_path: defaultScript,
-    },
-    create_script_file: {
-      script_path: "scripts/WrapperGenerated.gd",
-      content:
-        placeholderPolicy === "content_placeholder_allowed_if_explicit"
-          ? "extends Node\n\nfunc _ready():\n\tprint(\"wrapper generated\")\n"
-          : "extends Node\n",
-    },
-    modify_script_file: {
-      script_path: "scripts/WrapperGenerated.gd",
-      content: "extends Node\n\nfunc _ready():\n\tprint(\"wrapper modified\")\n",
-      replace_mode: "replace_full",
-    },
-    run_project: {
-      headless: true,
-      timeout_seconds: 3,
-    },
-    get_debug_output: {
-      last_n: 10,
-    },
-    rename_project: {
-      project_name: "WrapperTestProject",
-    },
-  };
-  const params = defaults[operation] ?? {};
-  return {
-    ...params,
-    project_root: projectRoot ?? null,
-  };
-}
+async function runTestAll({ executor, projectRoot, allowMutatingTools = false }) {
+  // This wrapper validates the same constrained prototype operation interface
+  // used by edit mode (RecipeEngine lifecycle), not the raw discovered tool list.
+  const events = [];
+  const recipeEngine = new RecipeEngine();
 
-async function runTestAll({ executor, projectRoot, allowMutatingTools }) {
-  const events = []; // in-memory only; no default persistence
-  const sessionManager = getGoPeakSessionManager();
-  const startInfo = await sessionManager.ensureStarted();
-  console.log("[GoPeakWrapper] session owner initialized", {
-    reused_existing_session: Boolean(startInfo?.reused),
-    status: sessionManager.getStatus(),
-  });
+  const supportedOpsRes = await executor.getSupportedOperations();
+  const discoveredOperations = Array.isArray(supportedOpsRes?.output?.operations)
+    ? supportedOpsRes.output.operations
+    : [];
 
-  const discovered = await sessionManager.listAvailableTools({ refresh: true });
-  if (!discovered?.ok) {
-    console.error("[GoPeakWrapper] discovery failed:", discovered?.error ?? "unknown");
-    return { ok: false, events };
-  }
-
-  const rawTools = normalizeRawTools(discovered?.tools ?? []);
-  const manifest = deriveSupportedOperations(rawTools);
-  const supportedOps = new Set(
-    (Array.isArray(manifest?.operations) ? manifest.operations : [])
-      .filter((o) => o?.enabled)
-      .map((o) => String(o.operation))
+  const enabledMap = new Map(
+    discoveredOperations
+      .filter((o) => o && typeof o.operation === "string")
+      .map((o) => [String(o.operation), Boolean(o.enabled)])
   );
 
-  console.log(`[GoPeakWrapper] discovered tools: ${rawTools.length}`);
-  console.log(`[GoPeakWrapper] tool_names=${JSON.stringify(rawTools.map((t) => t.name))}`);
-  console.log(`[GoPeakWrapper] supported operations: ${JSON.stringify(manifest.summary, null, 2)}`);
-
-  let bridge = null;
-  try {
-    bridge = await sessionManager.waitForBridgeReady(projectRoot, { timeoutMs: 1000, pollMs: 250 });
-  } catch {
-    bridge = null;
-  }
-  const connectedProjectPath = await sessionManager.getConnectedProjectPath().catch(() => null);
-  const prerequisiteContext = {
-    projectRoot,
-    bridgeReady: Boolean(bridge?.isBridgeReady),
-    runtimeAddonReady: false,
-    lspReady: false,
-    dapReady: false,
-  };
-  console.log("[GoPeakWrapper] prerequisite context", {
-    bridge_ready: prerequisiteContext.bridgeReady,
-    connected_project_path: connectedProjectPath,
-  });
-
-  // Wrapper now tests canonical operations (same contract as edit mode/executor),
-  // while still printing raw discovery for transparency.
-  const registryOps = getAllOperationDefinitions();
-  const counts = {
-    total: registryOps.length,
-    supported: 0,
-    unsupported: 0,
-    prerequisite_missing: 0,
-    executed: 0,
-    fallback_used: 0,
-    expected_outcome_verified: 0,
-    skipped: 0,
-    failed: 0,
-  };
-  const byCategory = {}; // operation category
-
-  for (const def of registryOps) {
-    const op = String(def.operation);
-    const category = String(def.category ?? "unknown");
-    byCategory[category] = byCategory[category] ?? { total: 0, executed: 0, failed: 0, skipped: 0 };
-    byCategory[category].total += 1;
-
-    if (!supportedOps.has(op)) {
-      counts.unsupported += 1;
-      byCategory[category].skipped += 1;
-      events.push({ operation: op, category, status: "unsupported", reason: "not enabled by discovery" });
-      console.log(`[UNSUPPORTED] ${op} | category=${category} | reason=not enabled by discovery`);
-      continue;
-    }
-    counts.supported += 1;
-
-    const prerequisites = getOperationPrerequisites(op);
-    const eligible = hasPrerequisites(prerequisites, prerequisiteContext);
-    if (!eligible) {
-      const primaryMissing = prerequisites.find((p) => !hasPrerequisites([p], prerequisiteContext)) ?? "unknown";
-      const reason = explainSkipReason({
-        prerequisiteClass: primaryMissing,
-        toolName: op,
-        missingContext: prerequisiteContext,
-      });
-      counts.prerequisite_missing += 1;
-      byCategory[category].skipped += 1;
-      events.push({ operation: op, category, status: "prerequisite_missing", reason });
-      console.log(`[PREREQUISITE_MISSING] ${op} | category=${category} | reason=${reason}`);
-      continue;
-    }
-
-    const placeholderPolicy = getOperationPlaceholderPolicy(op);
-    const params = buildCanonicalOperationParams({
-      operation: op,
-      projectRoot,
-      placeholderPolicy,
+  if (GOPEAK_DISCOVERY_DEBUG) {
+    // eslint-disable-next-line no-console
+    console.log("[GoPeakWrapper][DEBUG] getSupportedOperations", {
+      enabled_operations: discoveredOperations.filter((o) => o?.enabled).map((o) => o.operation),
+      disabled_operations: discoveredOperations.filter((o) => !o?.enabled).map((o) => o.operation),
+      suppressed: "raw tool inventory is handled inside GodotExecutor when DEBUG_GOPEAK_DISCOVERY=true",
     });
-    if (!allowMutatingTools && ["create_script_file", "modify_script_file", "rename_project"].includes(op)) {
-      counts.skipped += 1;
-      byCategory[category].skipped += 1;
-      events.push({ operation: op, category, status: "skipped", reason: "mutating op requires --allow-mutating-tools" });
-      console.log(`[SKIPPED] ${op} | category=${category} | reason=mutating op requires --allow-mutating-tools`);
+  } else {
+    // eslint-disable-next-line no-console
+    console.log("[GoPeakWrapper] supported prototype enabled by discovery:", {
+      enabled_ops_count: Array.from(enabledMap.values()).filter(Boolean).length,
+    });
+  }
+
+  const FORCE_ENABLED = new Set(["inspect_scene", "create_script_file"]);
+  const counts = {
+    total_tested: 0,
+    supported: 0,
+    skipped_prerequisite_missing: 0,
+    semantic_verification_failed: 0,
+    failed: 0,
+    success: 0,
+    unsupported_by_discovery: 0,
+    allow_mutating_tools: Boolean(allowMutatingTools),
+  };
+
+  const orderedOps = Array.isArray(SUPPORTED_RECIPES)
+    ? [...SUPPORTED_RECIPES.filter((o) => o !== "inspect_scene"), "inspect_scene"]
+    : [];
+
+  for (const op of orderedOps) {
+    const supportedByDiscovery = FORCE_ENABLED.has(op) || enabledMap.get(op) === true;
+
+    if (!supportedByDiscovery) {
+      counts.unsupported_by_discovery += 1;
+      events.push({ operation: op, status: "unsupported", reason: "not enabled by discovery" });
+      // eslint-disable-next-line no-console
+      console.log(`[UNSUPPORTED] ${op}`);
       continue;
     }
 
+    counts.supported += 1;
+    counts.total_tested += 1;
+
+    const params = buildPrototypeOperationParams(op);
+    const start = Date.now();
+    let recipeRes = null;
     try {
-      const start = Date.now();
-      const res = await executor.executeOperation({ action: op, params });
-      const elapsed = Date.now() - start;
-      counts.executed += 1;
-      byCategory[category].executed += 1;
-      const failed = res?.ok !== true;
-      if (failed) {
-        counts.failed += 1;
-        byCategory[category].failed += 1;
-        const reason = safeError(res?.error ?? "operation failed");
-        events.push({
-          operation: op,
-          category,
-          status: "failed",
-          params,
-          fallback_used: Boolean(res?.fallback_used),
-          expected_outcome_verified: Boolean(res?.expected_outcome_verified),
-          reason,
-          elapsed_ms: elapsed,
-        });
-        console.log(`[FAILED] ${op} | category=${category} | args=${summarizeArgs(params)} | reason=${reason}`);
-      } else {
-        if (res?.fallback_used) counts.fallback_used += 1;
-        if (res?.expected_outcome_verified) counts.expected_outcome_verified += 1;
-        events.push({
-          operation: op,
-          category,
-          status: "executed",
-          params,
-          fallback_used: Boolean(res?.fallback_used),
-          expected_outcome_verified: Boolean(res?.expected_outcome_verified),
-          reason: null,
-          elapsed_ms: elapsed,
-        });
-        console.log(
-          `[EXECUTED] ${op} | category=${category} | args=${summarizeArgs(params)} | fallback_used=${Boolean(res?.fallback_used)} | expected_outcome_verified=${Boolean(res?.expected_outcome_verified)} | elapsed_ms=${elapsed}`
-        );
-      }
+      recipeRes = await recipeEngine.runRecipe({ operation: op, params, executor, projectRoot });
     } catch (err) {
-      counts.failed += 1;
-      byCategory[category].failed += 1;
       const reason = safeError(err);
+      counts.failed += 1;
+      events.push({ operation: op, status: "failed", reason, error: safeError(err), elapsed_ms: Date.now() - start });
+      // eslint-disable-next-line no-console
+      console.log(`[FAILED] ${op} | reason=${reason}`);
+      continue;
+    }
+
+    const elapsed = Date.now() - start;
+    if (recipeRes?.ok === true) {
+      if (op === "inspect_scene") {
+        const sceneExists = recipeRes?.output?.execution?.output?.scene_exists;
+        if (sceneExists === false) {
+          counts.semantic_verification_failed += 1;
+          events.push({
+            operation: op,
+            status: "semantic verification failed",
+            reason: "inspect_scene could not find expected scene on disk",
+            elapsed_ms: elapsed,
+            inputs: params,
+          });
+          // eslint-disable-next-line no-console
+          console.log(`[SEMANTIC FAILED] ${op} | reason=scene_exists=false`);
+          continue;
+        }
+      }
+
+      counts.success += 1;
+      events.push({ operation: op, status: "success", elapsed_ms: elapsed, inputs: params });
+      // eslint-disable-next-line no-console
+      console.log(`[SUCCESS] ${op} | elapsed_ms=${elapsed}`);
+      continue;
+    }
+
+    if (recipeRes?.phase === "prerequisite_check") {
+      counts.skipped_prerequisite_missing += 1;
+      const reason = recipeRes?.output?.prerequisite?.error ?? recipeRes?.error ?? "prerequisite missing";
+      events.push({ operation: op, status: "skipped_prerequisite_missing", reason, elapsed_ms: elapsed, inputs: params });
+      // eslint-disable-next-line no-console
+      console.log(`[SKIPPED] ${op} | prerequisite missing: ${reason}`);
+      continue;
+    }
+
+    // Semantic verification is the prototype-specific validation layer:
+    // - create_scene uses executor semantic_check.match
+    // - other operations use RecipeEngine validation checks
+    const semanticCheck = recipeRes?.output?.execution?.output?.semantic_check ?? null;
+    const validation = recipeRes?.output?.validation ?? null;
+
+    const semanticVerificationFailed =
+      Boolean(semanticCheck && semanticCheck.match === false) ||
+      Boolean(validation && validation.ok === false && (validation.type_match === false || validation.name_match === false || op !== "create_scene"));
+
+    if (semanticVerificationFailed) {
+      counts.semantic_verification_failed += 1;
+      let reason = recipeRes?.error ?? "semantic verification failed";
+      if (semanticCheck && semanticCheck.match === false) {
+        const expected = semanticCheck?.expectation ?? {};
+        const actual = semanticCheck?.actual ?? {};
+        reason = `create_scene semantic mismatch: expected(type=${expected?.root_node_type ?? "?"}, name=${expected?.root_node_name ?? "?"}) actual(type=${actual?.root_node_type ?? "?"}, name=${actual?.root_node_name ?? "?"})`;
+      } else if (validation && validation.ok === false) {
+        // RecipeEngine validation checks drive this path for add_node/set_node_properties/save_scene.
+        reason = recipeRes?.error ?? "prototype semantic verification failed";
+      }
       events.push({
         operation: op,
-        category,
-        status: "failed",
-        params,
+        status: "semantic verification failed",
         reason,
+        elapsed_ms: elapsed,
+        inputs: params,
       });
-      console.log(`[FAILED] ${op} | category=${category} | args=${summarizeArgs(params)} | reason=${reason}`);
+      // eslint-disable-next-line no-console
+      console.log(`[SEMANTIC FAILED] ${op} | reason=${reason}`);
+      continue;
     }
+
+    counts.failed += 1;
+    const reason = recipeRes?.error ?? "operation failed";
+    events.push({ operation: op, status: "failed", reason, elapsed_ms: elapsed, inputs: params, recipe_result: recipeRes });
+    // eslint-disable-next-line no-console
+    console.log(`[FAILED] ${op} | reason=${reason}`);
   }
 
-  console.log("\n=== GoPeak Wrapper Summary ===");
-  console.log(
-    JSON.stringify(
-      {
-        counts,
-        by_category: byCategory,
-      },
-      null,
-      2
-    )
-  );
+  // eslint-disable-next-line no-console
+  console.log("\n=== Prototype RecipeEngine Wrapper Summary ===");
+  // eslint-disable-next-line no-console
+  console.log(JSON.stringify(counts, null, 2));
 
-  return { ok: true, counts, byCategory, events };
+  return { ok: true, counts, events };
 }
 
 async function main() {

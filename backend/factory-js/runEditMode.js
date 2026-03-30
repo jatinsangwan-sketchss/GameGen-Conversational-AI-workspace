@@ -8,8 +8,8 @@
  * interactive loop to `src/conversation/TerminalEditModeRunner.js`.
  */
 
-import { runTerminalEditMode } from "./src/conversation/TerminalEditModeRunner.js";
-import { getGoPeakSessionManager } from "./src/godot/GoPeakSessionManager.js";
+import { runTerminalEditMode } from "./core/conversation/TerminalEditModeRunner.js";
+import { getGoPeakSessionManager } from "./core/godot/GoPeakSessionManager.js";
 
 function parseArg(argv, flag) {
   const idx = argv.indexOf(flag);

@@ -7,6 +7,11 @@
       "path": "scenes/Test.tscn",
       "root_type": "Node2D",
       "root_name": "Test"
+    },
+    {
+      "path": "scenes/Game.tscn",
+      "root_type": "Node2D",
+      "root_name": "Game"
     }
   ],
   "scripts_to_create": [
