@@ -1,0 +1,20 @@
+{
+  "handoff_id": "handoff_1774594310266",
+  "ts": "2026-03-27T06:51:50.266Z",
+  "current_goal": "test",
+  "constraints": [],
+  "acceptance_criteria": [],
+  "open_decisions": [],
+  "recent_actions": [
+    "2026-03-27T03:56:53.127Z record_execution_trace",
+    "2026-03-27T03:56:53.128Z record_execution_trace",
+    "2026-03-27T06:40:37.718Z capture_intent_snapshot",
+    "2026-03-27T06:40:37.721Z record_execution_trace",
+    "2026-03-27T06:40:37.722Z record_execution_trace"
+  ],
+  "next_actions": [
+    "Validate active intent against latest user message",
+    "Resolve top open decision and record rationale",
+    "Execute next implementation step and append execution trace"
+  ]
+}

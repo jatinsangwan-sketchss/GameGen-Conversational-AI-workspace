@@ -1,0 +1,100 @@
+{
+  "project_name": "Typing",
+  "status": "pass",
+  "checks": [
+    {
+      "id": "required_scenes_exist",
+      "description": "All required scene files from recipe exist.",
+      "status": "pass",
+      "details": "All required files exist."
+    },
+    {
+      "id": "required_scripts_exist",
+      "description": "All required script files from recipe exist.",
+      "status": "pass",
+      "details": "All required files exist."
+    },
+    {
+      "id": "required_systems_exist",
+      "description": "All required shared system files from recipe exist.",
+      "status": "pass",
+      "details": "All required files exist."
+    },
+    {
+      "id": "check_main_menu_start_button",
+      "description": "Main Menu scene contains a Button node named 'StartButton'.",
+      "status": "skip",
+      "details": "No dedicated v1 evaluator for this check id yet."
+    },
+    {
+      "id": "check_gameplay_player_node",
+      "description": "Gameplay scene contains a Node2D named 'Player'.",
+      "status": "skip",
+      "details": "No dedicated v1 evaluator for this check id yet."
+    },
+    {
+      "id": "check_gameplay_letter_spawner_node",
+      "description": "Gameplay scene contains a Node2D named 'LetterSpawner'.",
+      "status": "skip",
+      "details": "No dedicated v1 evaluator for this check id yet."
+    },
+    {
+      "id": "check_gameplay_hud_node",
+      "description": "Gameplay scene contains a Control node named 'HUD'.",
+      "status": "skip",
+      "details": "No dedicated v1 evaluator for this check id yet."
+    },
+    {
+      "id": "check_letter_enemy_scene",
+      "description": "LetterEnemy scene contains a Label node named 'LetterLabel'.",
+      "status": "skip",
+      "details": "No dedicated v1 evaluator for this check id yet."
+    },
+    {
+      "id": "check_fail_popup_nodes",
+      "description": "FailPopup scene contains Label 'ResultLabel' and Buttons 'RetryButton' and 'MenuButton'.",
+      "status": "skip",
+      "details": "No dedicated v1 evaluator for this check id yet."
+    },
+    {
+      "id": "check_scripts_exist",
+      "description": "All referenced script files exist in the project.",
+      "status": "pass",
+      "details": "All script files exist."
+    },
+    {
+      "id": "bounded_runtime_startup",
+      "description": "Project starts and runs within bounded runtime window.",
+      "status": "pass",
+      "details": "Runtime succeeded."
+    }
+  ],
+  "errors": [],
+  "warnings": [
+    {
+      "message": "Validation check skipped (no v1 evaluator): check_main_menu_start_button",
+      "file": ""
+    },
+    {
+      "message": "Validation check skipped (no v1 evaluator): check_gameplay_player_node",
+      "file": ""
+    },
+    {
+      "message": "Validation check skipped (no v1 evaluator): check_gameplay_letter_spawner_node",
+      "file": ""
+    },
+    {
+      "message": "Validation check skipped (no v1 evaluator): check_gameplay_hud_node",
+      "file": ""
+    },
+    {
+      "message": "Validation check skipped (no v1 evaluator): check_letter_enemy_scene",
+      "file": ""
+    },
+    {
+      "message": "Validation check skipped (no v1 evaluator): check_fail_popup_nodes",
+      "file": ""
+    }
+  ],
+  "generated_at": "2026-03-27T02:41:54.173Z"
+}
