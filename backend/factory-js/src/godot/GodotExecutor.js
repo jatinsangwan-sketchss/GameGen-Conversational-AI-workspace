@@ -33,7 +33,9 @@ import {
   validateOperationParams,
   getPrimaryExecutionPath,
   getSuccessExpectations,
+  getOperationContextRequirements,
 } from "./GoPeakOperationRegistry.js";
+import { GOPEAK_DISCOVERY_DEBUG } from "./GoPeakDebugFlags.js";
 import {
   buildCreateSceneArgs,
   buildAddNodeArgs,
@@ -263,21 +265,26 @@ export class GodotExecutor {
       normalized_tool_key: normalizeToolKey(name),
     }));
     const byKey = new Map(names.map((n) => [normalizeToolKey(n), n]));
-    // eslint-disable-next-line no-console
-    console.log("[GodotExecutor] raw MCP tool normalization", {
-      operation,
-      discovered_tools: normalizedDiscoveredTools,
-    });
+    const resolutionDebug = GOPEAK_DISCOVERY_DEBUG;
+    if (resolutionDebug) {
+      // eslint-disable-next-line no-console
+      console.log("[GodotExecutor] raw MCP tool normalization", {
+        operation,
+        discovered_tools: normalizedDiscoveredTools,
+      });
+    }
     for (const alias of Array.isArray(aliases) ? aliases : []) {
       const normalizedAlias = normalizeToolKey(alias);
       const m = byKey.get(normalizedAlias);
-      // eslint-disable-next-line no-console
-      console.log("[GodotExecutor] MCP tool alias resolution", {
-        operation,
-        raw_tool_name: alias,
-        normalized_tool_key: normalizedAlias,
-        resolved_tool_match: m ?? null,
-      });
+      if (resolutionDebug) {
+        // eslint-disable-next-line no-console
+        console.log("[GodotExecutor] MCP tool alias resolution", {
+          operation,
+          raw_tool_name: alias,
+          normalized_tool_key: normalizedAlias,
+          resolved_tool_match: m ?? null,
+        });
+      }
       if (m) return { ok: true, tool_name: m };
     }
     return {
@@ -314,41 +321,204 @@ export class GodotExecutor {
       });
     }
 
-    const translatedByOperation = {
-      analyze_project: { project_root: this.projectRoot },
-      create_scene: buildCreateSceneArgs(params),
-      add_node: buildAddNodeArgs(params),
-      set_node_properties: buildSetNodePropertiesArgs(params),
-      save_scene: buildSaveSceneArgs(params),
+    // -------------------------------------------------------------
+    // ExecutionContext injection (session-derived, not planner params)
+    // -------------------------------------------------------------
+    const contextRequirements = getOperationContextRequirements(operation);
+    const needsEditorBridge = contextRequirements.includes("editor_bridge_context_required");
+    const needsConnectedProjectPath = contextRequirements.includes("connected_project_path_context_required");
+    const executionContext = {
+      // Provide both camel + snake variants so builders/tools can be explicit.
+      projectRoot: this.projectRoot,
+      project_root: this.projectRoot,
+      connectedProjectPath: null,
+      connected_project_path: null,
+      projectPath: null, // raw MCP tool contract key for many GoPeak tools
+      isBridgeReady: null,
+      debug: GOPEAK_DISCOVERY_DEBUG,
     };
-    const translated = translatedByOperation[operation] ?? {};
+
+    if (needsEditorBridge || needsConnectedProjectPath) {
+      const bridgeStatus = await this.getBridgeStatus({ expectedProjectRoot: this.projectRoot });
+      const isReady = Boolean(bridgeStatus?.output?.isBridgeReady) === true;
+      const projectMatches = Boolean(bridgeStatus?.output?.projectMatches) === true;
+
+      executionContext.isBridgeReady = isReady;
+      executionContext.connectedProjectPath = bridgeStatus?.output?.connectedProjectPath ?? null;
+      executionContext.connected_project_path = executionContext.connectedProjectPath;
+      executionContext.projectPath = executionContext.connectedProjectPath;
+
+      // Ensure prerequisites happen before any builder translation.
+      if (needsEditorBridge && (!isReady || !projectMatches)) {
+        return this._canonicalResult({
+          ok: false,
+          operation,
+          backend: "mcp",
+          primaryPathAttempted: "context_injection_bridge_ready",
+          primaryPathSucceeded: false,
+          inputs: params,
+          output: {
+            context_requirements: contextRequirements,
+            bridge_status: bridgeStatus?.output ?? null,
+          },
+          error: `Missing required injected context: editor_bridge_context_required (bridgeReady=${String(isReady)}, projectMatches=${String(projectMatches)}).`,
+        });
+      }
+
+      if (needsConnectedProjectPath && !executionContext.projectPath) {
+        return this._canonicalResult({
+          ok: false,
+          operation,
+          backend: "mcp",
+          primaryPathAttempted: "context_injection_connected_project_path",
+          primaryPathSucceeded: false,
+          inputs: params,
+          output: {
+            context_requirements: contextRequirements,
+            bridge_status: bridgeStatus?.output ?? null,
+          },
+          error: "Missing required injected context: connected_project_path_context_required (projectPath for GoPeak tool arguments).",
+        });
+      }
+    }
+
+    // IMPORTANT: Do not use one object literal with a property per operation.
+    // In JavaScript, *all* property values are evaluated when the object is created,
+    // so create_scene would still run buildAddNodeArgs(params) and fail with
+    // "Missing required parameter: node_name" because create_scene params lack node_name.
+    let translated = {};
+    if (operation === "analyze_project") {
+      translated = { project_root: this.projectRoot };
+    } else if (operation === "create_scene") {
+      translated = buildCreateSceneArgs(params, executionContext);
+    } else if (operation === "add_node") {
+      translated = buildAddNodeArgs(params, executionContext);
+    } else if (operation === "set_node_properties") {
+      translated = buildSetNodePropertiesArgs(params, executionContext);
+    } else if (operation === "save_scene") {
+      translated = buildSaveSceneArgs(params, executionContext);
+    }
     const requestPayload = {
       name: resolved.tool_name,
       arguments: translated,
     };
-    // eslint-disable-next-line no-console
-    console.log("[GodotExecutor] canonical operation execution", {
+    const logArgs = {
       operation,
       primary_path: "mcp_tool",
-      canonical_params: params,
+      canonical_params: {
+        ...(operation === "create_scene"
+          ? {
+              scene_path: params?.scene_path ?? null,
+              root_node_name: params?.root_node_name ?? null,
+              root_node_type: params?.root_node_type ?? null,
+            }
+          : {}),
+      },
       resolved_tool: resolved.tool_name,
-      translated_raw_mcp_args: translated,
-      final_request_payload: requestPayload,
-    });
+      execution_context_injected: {
+        project_root: executionContext.project_root,
+        connected_project_path: executionContext.connectedProjectPath,
+        projectPath: executionContext.projectPath,
+        isBridgeReady: executionContext.isBridgeReady,
+        context_requirements: contextRequirements,
+      },
+      builder_output_keys: isPlainObject(translated) ? Object.keys(translated) : [],
+      ...(operation === "create_scene"
+        ? {
+            create_scene_has_projectPath: Object.prototype.hasOwnProperty.call(translated ?? {}, "projectPath"),
+            create_scene_has_scenePath: Object.prototype.hasOwnProperty.call(translated ?? {}, "scenePath"),
+            create_scene_has_rootNodeType: Object.prototype.hasOwnProperty.call(translated ?? {}, "rootNodeType"),
+          }
+        : {}),
+    };
+
+    if (GOPEAK_DISCOVERY_DEBUG) {
+      // eslint-disable-next-line no-console
+      console.log("[GodotExecutor] canonical operation execution (debug)", {
+        ...logArgs,
+        builder_output_before_mcp_call: translated,
+        translated_raw_mcp_args: translated,
+        final_request_payload: requestPayload,
+      });
+    } else {
+      // eslint-disable-next-line no-console
+      console.log("[GodotExecutor] canonical operation execution", logArgs);
+    }
     const res = await this._runMcpAction(operation, resolved.tool_name, translated);
+    let finalOk = res?.ok === true;
+    let semanticCheck = null;
+    let semanticError = null;
+
+    // Semantic verification: ensure the created scene root matches the requested
+    // root node name/type (planner semantic intent), not just that MCP returned ok.
+    if (finalOk && operation === "create_scene") {
+      const expectedRootName = safeString(params?.root_node_name).trim();
+      const expectedRootType = safeString(params?.root_node_type).trim();
+
+      const { sceneResPath, sceneFsRel, sceneAbs } = resolveScenePathBundle({
+        projectRoot: this.projectRoot,
+        scenePath: params?.scene_path,
+      });
+
+      const sceneExists = Boolean(sceneAbs && fs.existsSync(sceneAbs));
+      const sceneRaw = sceneExists ? fs.readFileSync(sceneAbs, "utf-8") : "";
+
+      const rootNode = parseSceneRootNodeFromTscn(sceneRaw);
+      const actualRootName = rootNode?.name ?? null;
+      const actualRootType = rootNode?.type ?? null;
+
+      // GoPeak's `create-scene` tool contract typically exposes root node TYPE
+      // but may not expose a root node NAME field. We only enforce the name
+      // expectation when the raw MCP argument payload includes a root-name key.
+      const supportsRootName =
+        Object.prototype.hasOwnProperty.call(translated ?? {}, "rootNodeName") ||
+        Object.prototype.hasOwnProperty.call(translated ?? {}, "node_name") ||
+        Object.prototype.hasOwnProperty.call(translated ?? {}, "nodeName");
+
+      const matchesName = supportsRootName ? (expectedRootName ? actualRootName === expectedRootName : true) : true;
+      const matchesType = expectedRootType ? actualRootType === expectedRootType : true;
+      const matches = matchesName && matchesType;
+
+      semanticCheck = {
+        expectation: { root_node_name: expectedRootName, root_node_type: expectedRootType },
+        actual: { root_node_name: actualRootName, root_node_type: actualRootType },
+        supports_root_node_name: Boolean(supportsRootName),
+        scene: { scene_res_path: sceneResPath, scene_fs_rel: sceneFsRel, exists: sceneExists },
+        match: matches,
+      };
+
+      if (GOPEAK_DISCOVERY_DEBUG) {
+        // eslint-disable-next-line no-console
+        console.log("[GodotExecutor][Semantic] create_scene root verification", semanticCheck);
+      }
+
+      if (!matches) {
+        finalOk = false;
+        const rootMismatchDetails = {
+          supports_root_node_name: Boolean(supportsRootName),
+          expected: { root_node_name: expectedRootName, root_node_type: expectedRootType },
+          actual: { root_node_name: actualRootName, root_node_type: actualRootType },
+          mismatch_name: supportsRootName ? expectedRootName ? actualRootName !== expectedRootName : false : false,
+          mismatch_type: expectedRootType ? actualRootType !== expectedRootType : false,
+        };
+        semanticError = `create_scene semantic verification failed: ${JSON.stringify(rootMismatchDetails)}.`;
+      }
+    }
+
     return this._canonicalResult({
-      ok: res?.ok === true,
+      ok: finalOk,
       operation,
       backend: "mcp",
       primaryPathAttempted: "mcp_tool",
-      primaryPathSucceeded: res?.ok === true,
-      expectedOutcomeVerified: res?.ok === true,
+      primaryPathSucceeded: finalOk,
+      expectedOutcomeVerified: finalOk,
       inputs: params,
       output: {
         translated_payload: translated,
         mcp_result: res,
+        semantic_check: semanticCheck,
       },
-      error: res?.ok ? null : res?.error ?? "MCP operation failed.",
+      error: finalOk ? null : semanticError ?? res?.error ?? "MCP operation failed.",
     });
   }
 
@@ -671,14 +841,16 @@ export class GodotExecutor {
 
     const rawTools = Array.isArray(supported?.output?.raw_tools) ? supported.output.raw_tools : [];
     const resolved = resolveFactoryOperation(rawTools, operation);
-    // eslint-disable-next-line no-console
-    console.log(`[GodotExecutor][MCP] resolve factory operation`, {
-      requested_operation: operation,
-      ok: resolved?.ok ?? false,
-      mode: resolved?.mode ?? null,
-      matched_tools: resolved?.matched_tools ?? [],
-      reason: resolved?.reason ?? null,
-    });
+    if (GOPEAK_DISCOVERY_DEBUG) {
+      // eslint-disable-next-line no-console
+      console.log(`[GodotExecutor][MCP] resolve factory operation`, {
+        requested_operation: operation,
+        ok: resolved?.ok ?? false,
+        mode: resolved?.mode ?? null,
+        matched_tools: resolved?.matched_tools ?? [],
+        reason: resolved?.reason ?? null,
+      });
+    }
 
     if (!resolved?.ok) {
       return {
@@ -1012,8 +1184,10 @@ export class GodotExecutor {
     const operations = Array.isArray(derived?.operations) ? derived.operations : [];
     const rawTools = Array.isArray(derived?.raw_tools) ? derived.raw_tools : [];
 
+    const discoveryDebug = GOPEAK_DISCOVERY_DEBUG;
+
     // eslint-disable-next-line no-console
-    console.log(`[GodotExecutor][MCP] discovery get_supported_operations`, {
+    console.log(`[GodotExecutor][MCP] discovery get_supported_operations`, discoveryDebug ? {
       discovered_tool_count: rawTools.length,
       discovered_tool_names: rawTools.map((t) => t.name),
       enabled_operations: operations.filter((o) => o.enabled).map((o) => o.operation),
@@ -1024,7 +1198,25 @@ export class GodotExecutor {
         mode: o.mode,
         matched_tools: o.matched_tools,
       })),
+    } : {
+      discovered_tool_count: rawTools.length,
+      enabled_operations: operations.filter((o) => o.enabled).map((o) => o.operation),
+      disabled_operations_count: operations.filter((o) => !o.enabled).length,
+      derivation: "suppressed (set DEBUG_GOPEAK_DISCOVERY=true to view full tool inventory)",
     });
+
+    if (discoveryDebug) {
+      const setNodePropsRawMatch = rawTools.find(
+        (t) => normalizeToolKey(t?.name) === normalizeToolKey("set-node-properties")
+      );
+      const derivedSetNodeProps = operations.find((o) => o?.operation === "set_node_properties");
+      // eslint-disable-next-line no-console
+      console.log("[GodotExecutor][MCP] mapping check set_node_properties", {
+        raw_tool_match: setNodePropsRawMatch?.name ?? null,
+        derived_enabled: Boolean(derivedSetNodeProps?.enabled),
+        derived_mode: derivedSetNodeProps?.mode ?? null,
+      });
+    }
 
     return this._storeAndReturn(
       normalizeResult({
@@ -1229,6 +1421,14 @@ export class GodotExecutor {
         },
       };
 
+      if (action === "create_scene" && GOPEAK_DISCOVERY_DEBUG) {
+        // eslint-disable-next-line no-console
+        console.log("[GodotExecutor][MCP] create_scene final tools/call.arguments", {
+          argument_keys: isPlainObject(inputs) ? Object.keys(inputs) : [],
+          arguments: prettyForLog(inputs),
+        });
+      }
+
       // #region agent log (MCP action start)
       postAgentDebugLog({
         hypothesisId: "H5_save_scene_tool_payload_or_server_contract_mismatch",
@@ -1246,14 +1446,20 @@ export class GodotExecutor {
 
       // eslint-disable-next-line no-console
       console.log(`[GodotExecutor][MCP] call ${String(method)} (${String(action)})`);
-      // Always print the request payload so attach_script failures are diagnosable.
-      // eslint-disable-next-line no-console
-      console.log(`[GodotExecutor][MCP] request payload`, prettyForLog(requestPayload));
+      // Keep normal-mode logs concise; only print full request payload for
+      // debugging (and keep it always for attach_script failures).
+      const debugPayload = GOPEAK_DISCOVERY_DEBUG;
+      if (debugPayload) {
+        // eslint-disable-next-line no-console
+        console.log(`[GodotExecutor][MCP] request payload`, prettyForLog(requestPayload));
+      }
 
       const called = await this._sessionManager.callTool(String(method), inputs);
       const response = called?.raw ?? null;
-      // eslint-disable-next-line no-console
-      console.log(`[GodotExecutor][MCP] raw response`, prettyForLog(response));
+      if (debugPayload) {
+        // eslint-disable-next-line no-console
+        console.log(`[GodotExecutor][MCP] raw response`, prettyForLog(response));
+      }
       // #region agent log (MCP action response)
       postAgentDebugLog({
         hypothesisId: "H5_save_scene_tool_payload_or_server_contract_mismatch",
@@ -1280,8 +1486,18 @@ export class GodotExecutor {
           output: {},
           error: "MCP client does not expose a callable method for this action.",
         });
-        // eslint-disable-next-line no-console
-        console.log(`[GodotExecutor][MCP] normalized result`, prettyForLog(normalized));
+        if (debugPayload) {
+          // eslint-disable-next-line no-console
+          console.log(`[GodotExecutor][MCP] normalized result`, prettyForLog(normalized));
+        } else {
+          // eslint-disable-next-line no-console
+          console.log(`[GodotExecutor][MCP] result`, {
+            action,
+            method,
+            ok: false,
+            error: normalized.error ?? null,
+          });
+        }
         return this._storeAndReturn(
           normalizeResult({
             ...normalized,
@@ -1307,8 +1523,18 @@ export class GodotExecutor {
           elapsed_ms: Date.now() - start,
         },
       };
-      // eslint-disable-next-line no-console
-      console.log(`[GodotExecutor][MCP] normalized result`, prettyForLog(normalized));
+      if (debugPayload) {
+        // eslint-disable-next-line no-console
+        console.log(`[GodotExecutor][MCP] normalized result`, prettyForLog(normalized));
+      } else {
+        // eslint-disable-next-line no-console
+        console.log(`[GodotExecutor][MCP] result`, {
+          action,
+          method,
+          ok: normalized.ok,
+          error: normalized.error ?? null,
+        });
+      }
       return this._storeAndReturn(normalized);
     } catch (err) {
       const timedOut = err?.code === "ETIMEDOUT" || err?.timeoutMs != null;
@@ -1655,7 +1881,7 @@ class GodotMcpStdioClient {
   async _connectAndInit() {
     if (this._connected) return;
 
-    if (this.debug) {
+    if (GOPEAK_DISCOVERY_DEBUG) {
       // eslint-disable-next-line no-console
       console.log(`[GodotExecutor][MCP] starting server: ${this.command} ${this.args.join(" ")}`, {
         cwd: this.workingDirectory ?? null,
@@ -1679,7 +1905,7 @@ class GodotMcpStdioClient {
 
     this._proc.stdout.on("data", (chunk) => this._handleData(chunk));
     this._proc.stderr.on("data", (chunk) => {
-      if (this.debug) {
+      if (GOPEAK_DISCOVERY_DEBUG) {
         // eslint-disable-next-line no-console
         console.log(`[GodotExecutor][MCP][stderr] ${chunk.toString("utf-8").trim()}`);
       }
@@ -1725,7 +1951,7 @@ class GodotMcpStdioClient {
       this._toolsListed = true;
       this._cachedToolsList = toolsList ?? null;
       this._toolNames = extractToolNamesFromToolsList(toolsList);
-      if (this.debug) {
+      if (GOPEAK_DISCOVERY_DEBUG) {
         const tools = extractToolEntries(toolsList);
         const names = Array.isArray(tools) ? tools.map((t) => t?.name).filter(Boolean) : [];
         // eslint-disable-next-line no-console
@@ -1734,7 +1960,7 @@ class GodotMcpStdioClient {
         });
       }
     } catch (err) {
-      if (this.debug) {
+      if (GOPEAK_DISCOVERY_DEBUG) {
         // eslint-disable-next-line no-console
         console.log(`[GodotExecutor][MCP] tools/list failed (continuing): ${String(err?.message ?? err)}`);
       }
@@ -1910,7 +2136,7 @@ class GodotMcpStdioClient {
       },
     };
 
-    if (this.debug) {
+    if (GOPEAK_DISCOVERY_DEBUG) {
       // eslint-disable-next-line no-console
       console.log(`[GodotExecutor][MCP] tools/list pagination`, {
         page_fetch_count: pageCount,
@@ -1987,6 +2213,12 @@ function resolveScenePathBundle({ projectRoot, scenePath }) {
     .replace(/^\/+/, "");
   const sceneAbs = path.resolve(projectRoot, sceneFsRel);
   return { sceneResPath, sceneFsRel, sceneAbs };
+}
+
+function parseSceneRootNodeFromTscn(sceneRaw) {
+  const m = String(sceneRaw ?? "").match(/\[node\s+name="([^"]+)"\s+type="([^"]+)"/);
+  if (!m) return null;
+  return { name: m?.[1] ?? null, type: m?.[2] ?? null };
 }
 
 function normalizeProjectRootPath(projectRootInput, cwd) {

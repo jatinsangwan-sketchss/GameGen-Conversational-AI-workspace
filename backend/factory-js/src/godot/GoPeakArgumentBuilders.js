@@ -53,53 +53,104 @@ function withOptionalString(target, key, value) {
   return target;
 }
 
-function buildCreateSceneArgs(canonicalParams = {}) {
-  const scenePath = normalizeResPath(assertRequiredString(canonicalParams, "scene_path"));
-  const rootNodeName = assertRequiredString(canonicalParams, "root_node_name");
+function getInjectedProjectPath(executionContext = {}) {
+  const v =
+    executionContext?.projectPath ??
+    executionContext?.connectedProjectPath ??
+    executionContext?.connected_project_path ??
+    executionContext?.project_root ??
+    executionContext?.projectRoot ??
+    null;
+  if (!isNonEmptyString(v)) {
+    throw new Error("Missing required injected context: projectPath");
+  }
+  return String(v).trim();
+}
+
+function buildCreateSceneArgs(canonicalParams = {}, executionContext = {}) {
+  // Canonical params (registry/planner):
+  // - scene_path (planner uses res:// form)
+  // - root_node_name (planner intent; GoPeak create-scene tool does NOT expose a root name field)
+  // - root_node_type (planner intent)
+  //
+  // Raw GoPeak `create-scene` MCP contract (from tools/list):
+  // - projectPath (required, absolute filesystem path)
+  // - scenePath   (required, project-relative path; not res://)
+  // - rootNodeType (optional, Godot class name; default Node)
+  //
+  // Note: root node name cannot be set via this tool contract, so we do NOT
+  // attempt to send a name field into the raw args.
+  const debug = executionContext?.debug === true || String(process.env.DEBUG_GOPEAK_ARGUMENT_BUILDERS ?? "").toLowerCase() === "true";
+  const projectPath = getInjectedProjectPath(executionContext);
+
+  const sceneResPath = normalizeResPath(assertRequiredString(canonicalParams, "scene_path"));
+  const sceneFsRel = String(sceneResPath).replace(/^res:\/\//, "").replace(/^\/+/, "");
+
   const rootNodeType = assertRequiredString(canonicalParams, "root_node_type");
-  // Canonical operation contract uses root_* fields, but GoPeak's raw
-  // create-scene MCP tool expects node_name/node_type for the root node.
+  // Keep canonical root_node_name validation (planner contract), but do not send it.
+  void assertRequiredString(canonicalParams, "root_node_name");
+
   const out = {
-    scene_path: scenePath,
-    node_name: rootNodeName,
-    node_type: rootNodeType,
+    projectPath,
+    scenePath: sceneFsRel,
+    rootNodeType,
   };
-  if (Array.isArray(canonicalParams.nodes)) out.nodes = canonicalParams.nodes;
+
+  if (debug) {
+    // eslint-disable-next-line no-console
+    console.log("[GoPeakArgumentBuilders] buildCreateSceneArgs canonical -> raw", {
+      canonical_params: {
+        scene_path: canonicalParams?.scene_path ?? null,
+        root_node_name: canonicalParams?.root_node_name ?? null,
+        root_node_type: canonicalParams?.root_node_type ?? null,
+      },
+      execution_context: {
+        projectPath,
+        isBridgeReady: executionContext?.isBridgeReady ?? null,
+      },
+      raw_args: out,
+    });
+  }
   return out;
 }
 
-function buildAddNodeArgs(canonicalParams = {}) {
+function buildAddNodeArgs(canonicalParams = {}, executionContext = {}) {
   const scenePath = normalizeResPath(assertRequiredString(canonicalParams, "scene_path"));
   const nodeName = assertRequiredString(canonicalParams, "node_name");
   const nodeType = assertRequiredString(canonicalParams, "node_type");
   const parentPath = isNonEmptyString(canonicalParams.parent_path)
     ? String(canonicalParams.parent_path).trim()
     : ".";
+  const projectPath = getInjectedProjectPath(executionContext);
   return {
     scene_path: scenePath,
     node_name: nodeName,
     node_type: nodeType,
     parent_path: parentPath,
+    projectPath,
   };
 }
 
-function buildSetNodePropertiesArgs(canonicalParams = {}) {
+function buildSetNodePropertiesArgs(canonicalParams = {}, executionContext = {}) {
   const scenePath = normalizeResPath(assertRequiredString(canonicalParams, "scene_path"));
   const nodePath = assertRequiredString(canonicalParams, "node_path");
   const properties = canonicalParams.properties;
   if (!isPlainObject(properties) || Object.keys(properties).length === 0) {
     throw new Error("Missing required parameter: properties (non-empty object)");
   }
+  const projectPath = getInjectedProjectPath(executionContext);
   return {
     scene_path: scenePath,
     node_path: nodePath,
     properties,
+    projectPath,
   };
 }
 
-function buildSaveSceneArgs(canonicalParams = {}) {
+function buildSaveSceneArgs(canonicalParams = {}, executionContext = {}) {
   const scenePath = normalizeResPath(assertRequiredString(canonicalParams, "scene_path"));
-  return { scene_path: scenePath };
+  const projectPath = getInjectedProjectPath(executionContext);
+  return { scene_path: scenePath, projectPath };
 }
 
 function buildAttachScriptSetPropertyParams(canonicalParams = {}) {
@@ -116,7 +167,12 @@ function buildAttachScriptSetPropertyParams(canonicalParams = {}) {
 }
 
 function buildAttachScriptSaveSceneParams(canonicalParams = {}) {
-  return buildSaveSceneArgs(canonicalParams);
+  // Composed operation helper:
+  // Return canonical `save_scene` params only (scene_path).
+  // Raw tool args (including projectPath) must be injected inside
+  // GodotExecutor when translating the canonical operation.
+  const scenePath = normalizeResPath(assertRequiredString(canonicalParams, "scene_path"));
+  return { scene_path: scenePath };
 }
 
 function buildCreateScriptFileArgs(canonicalParams = {}, { projectRoot = null } = {}) {

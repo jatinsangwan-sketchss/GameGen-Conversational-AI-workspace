@@ -4,10 +4,9 @@
   "target_path": "/Users/ishanharshaddiwekar/Project/GameGen-Conversational-AI-workspace/backend/artifacts/Typing/run_001/project",
   "scenes_to_create": [
     {
-      "path": "scenes/sceed.tscn",
+      "path": "scenes/Test.tscn",
       "root_type": "Node2D",
-      "root_name": "scscs",
-      "nodes": []
+      "root_name": "Test"
     }
   ],
   "scripts_to_create": [

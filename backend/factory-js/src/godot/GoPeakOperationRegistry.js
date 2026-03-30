@@ -61,6 +61,10 @@ const OPERATION_DEFINITIONS = freezeDeep([
     prerequisites: ["project_required", "editor_bridge_required"],
     required_params: ["scene_path", "root_node_name", "root_node_type"],
     optional_params: ["nodes"],
+    // ExecutionContext requirements are NOT planner params.
+    // They are derived from the active GoPeak session/bridge and injected
+    // into the raw MCP tool arguments by GodotExecutor + GoPeakArgumentBuilders.
+    context_requirements: ["editor_bridge_context_required", "connected_project_path_context_required"],
     placeholder_policy: "allow_safe_defaults_for_root_fields",
     fallback_policy: "fail_if_primary_unavailable",
     primary_execution_path: "mcp_tool",
@@ -78,6 +82,8 @@ const OPERATION_DEFINITIONS = freezeDeep([
     prerequisites: ["project_required", "editor_bridge_required"],
     required_params: ["scene_path", "node_name", "node_type"],
     optional_params: ["parent_path"],
+    // Raw editor-backed tools typically need the active connected project path.
+    context_requirements: ["editor_bridge_context_required", "connected_project_path_context_required"],
     placeholder_policy: "allow_safe_defaults_for_parent_path",
     fallback_policy: "fail_if_primary_unavailable",
     primary_execution_path: "mcp_tool",
@@ -95,6 +101,8 @@ const OPERATION_DEFINITIONS = freezeDeep([
     prerequisites: ["project_required", "editor_bridge_required"],
     required_params: ["scene_path", "node_path", "properties"],
     optional_params: ["property_changes"],
+    // Raw editor-backed tools typically need the active connected project path.
+    context_requirements: ["editor_bridge_context_required", "connected_project_path_context_required"],
     placeholder_policy: "properties_must_be_explicit",
     fallback_policy: "fail_if_primary_unavailable",
     primary_execution_path: "mcp_tool",
@@ -112,6 +120,8 @@ const OPERATION_DEFINITIONS = freezeDeep([
     prerequisites: ["project_required", "editor_bridge_required"],
     required_params: ["scene_path"],
     optional_params: [],
+    // Raw editor-backed tools typically need the active connected project path.
+    context_requirements: ["editor_bridge_context_required", "connected_project_path_context_required"],
     placeholder_policy: "no_placeholders_allowed",
     fallback_policy: "fail_if_primary_unavailable",
     primary_execution_path: "mcp_tool",
@@ -129,6 +139,9 @@ const OPERATION_DEFINITIONS = freezeDeep([
     prerequisites: ["project_required", "editor_bridge_required"],
     required_params: ["scene_path", "script_path"],
     optional_params: ["node_path", "node_name"],
+    // Although this operation composes other MCP calls, declaring context
+    // requirements keeps the contract consistent and future-proof.
+    context_requirements: ["editor_bridge_context_required", "connected_project_path_context_required"],
     placeholder_policy: "allow_root_node_default",
     fallback_policy: "fail_if_primary_unavailable",
     primary_execution_path: "composed_mcp_sequence",
@@ -299,6 +312,11 @@ function getOperationPlaceholderPolicy(operation) {
   return def?.placeholder_policy ?? null;
 }
 
+function getOperationContextRequirements(operation) {
+  const def = getOperationDefinition(operation);
+  return def?.context_requirements ? toStringArray(def.context_requirements) : [];
+}
+
 const GoPeakOperationRegistry = freezeDeep({
   operations: OPERATION_DEFINITIONS,
   operation_map: OPERATION_MAP,
@@ -315,5 +333,6 @@ export {
   getOperationPrerequisites,
   getOperationFallbackPolicy,
   getOperationPlaceholderPolicy,
+  getOperationContextRequirements,
 };
 

@@ -17,6 +17,7 @@ import {
   validateOperationParams,
   getAllOperationDefinitions,
 } from "../godot/GoPeakOperationRegistry.js";
+import { GOPEAK_DISCOVERY_DEBUG } from "../godot/GoPeakDebugFlags.js";
 
 const CHANGE_PLAN_SCHEMA = {
   type: "object",
@@ -737,10 +738,12 @@ export async function planChange({
     model: modelName,
   });
   // eslint-disable-next-line no-console
-  console.log("[ChangePlanner][LLM] prompt_template", {
-    id: PLANNER_PROMPT_TEMPLATE_ID,
-    canonical_operation_registry: getAllOperationDefinitions().map((o) => o.operation),
-  });
+  if (GOPEAK_DISCOVERY_DEBUG) {
+    console.log("[ChangePlanner][LLM] prompt_template", {
+      id: PLANNER_PROMPT_TEMPLATE_ID,
+      canonical_operation_registry: getAllOperationDefinitions().map((o) => o.operation),
+    });
+  }
 
   let rawText = "";
   try {
@@ -757,8 +760,10 @@ export async function planChange({
     };
   }
 
-  // eslint-disable-next-line no-console
-  console.log("[ChangePlanner][LLM] raw_response", rawText);
+  if (GOPEAK_DISCOVERY_DEBUG) {
+    // eslint-disable-next-line no-console
+    console.log("[ChangePlanner][LLM] raw_response", rawText);
+  }
 
   let parsed = null;
   try {
@@ -833,8 +838,10 @@ export async function planChange({
     };
   }
 
-  // eslint-disable-next-line no-console
-  console.log("[ChangePlanner][LLM] parsed_plan_summary", summarizePlan(plan));
+  if (GOPEAK_DISCOVERY_DEBUG) {
+    // eslint-disable-next-line no-console
+    console.log("[ChangePlanner][LLM] parsed_plan_summary", summarizePlan(plan));
+  }
 
   return { ok: true, plan };
 }

@@ -28,6 +28,10 @@ const DIRECT_OPERATION_DEFS = Object.freeze([
   { operation: "analyze_project", aliases: ["get-project-health", "validate-project", "get_project_health", "validate_project"] },
   { operation: "create_scene", aliases: ["create-scene", "create_scene", "createScene"] },
   { operation: "add_node", aliases: ["add-node", "add_node", "addNode"] },
+  // Raw tool name observed in discovery: `set-node-properties`.
+  // Map that to the factory operation `set_node_properties` so planners can
+  // accept and execute node property mutations.
+  { operation: "set_node_properties", aliases: ["set-node-properties", "set_node_properties", "setNodeProperties"] },
   { operation: "save_scene", aliases: ["save-scene", "save_scene", "saveScene"] },
 ]);
 

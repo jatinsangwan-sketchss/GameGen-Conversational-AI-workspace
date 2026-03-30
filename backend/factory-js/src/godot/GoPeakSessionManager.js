@@ -3,6 +3,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
+import { GOPEAK_DISCOVERY_DEBUG } from "./GoPeakDebugFlags.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_BRIDGE_WAIT_MS = 60_000;
@@ -785,7 +786,11 @@ class GoPeakSessionManager {
     list.push(line);
     while (list.length > 25) list.shift();
     this._bridgeProcessState[key] = list;
-    console.log(`[GoPeakSessionManager][${stream}] ${line}`);
+    // Keep normal edit-mode output concise: only print child stdout/stderr lines
+    // when DEBUG_GOPEAK_DISCOVERY=true.
+    if (GOPEAK_DISCOVERY_DEBUG) {
+      console.log(`[GoPeakSessionManager][${stream}] ${line}`);
+    }
   }
 
   _trackBridgeSignalsFromLog(line, stream) {
