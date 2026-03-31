@@ -1,0 +1,31 @@
+{
+  "elements": [
+    {
+      "asset": "splash_screen_background_gradient",
+      "xPercent": -0.007665064147499188,
+      "yPercent": -0.0062294131286404495,
+      "widthPercent": 0.7212983772073484,
+      "heightPercent": 0.721435756609921,
+      "rotation": 0,
+      "zIndex": 1
+    },
+    {
+      "asset": "splash_screen_game_logo",
+      "xPercent": 0.09764341446000518,
+      "yPercent": 0.11998713957883418,
+      "widthPercent": 0.5055528372664886,
+      "heightPercent": 0.15442239624476464,
+      "rotation": 0,
+      "zIndex": 2
+    },
+    {
+      "asset": "splash_screen_loading_indicator",
+      "xPercent": 0.10951025338092976,
+      "yPercent": 0.36187746630273077,
+      "widthPercent": 0.46817959412712584,
+      "heightPercent": 0.04350578612274412,
+      "rotation": 0,
+      "zIndex": 3
+    }
+  ]
+}

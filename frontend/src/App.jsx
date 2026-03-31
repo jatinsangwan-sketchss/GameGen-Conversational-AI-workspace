@@ -2,7 +2,9 @@
 import { useState, useRef, useEffect } from 'react'
 import { NexverseLogo, nexverseFont } from './Logo'
 import LayoutWorkspace from './components/LayoutWorkspace'
+import GameBuildPanel from './components/GameBuildPanel'
 import { API_BASE_URL } from './config/api.config'
+import { generateBlueprint, startGameBuild } from './api/gameBuildApi'
 
 // Color theme constants
 const colors = {
@@ -201,6 +203,10 @@ export default function App() {
   const [assets, setAssets] = useState({})
   const [layoutByScreen, setLayoutByScreen] = useState({})
   const [designContext, setDesignContext] = useState(null)
+  const [workspaceMode, setWorkspaceMode] = useState('layout')
+  const [gameBlueprint, setGameBlueprint] = useState(null)
+  const [pendingBuild, setPendingBuild] = useState(null)
+  const [isStartingBuild, setIsStartingBuild] = useState(false)
   const [saveNotice, setSaveNotice] = useState('')
   const saveNoticeTimer = useRef(null)
   const [input, setInput] = useState('')
@@ -235,6 +241,12 @@ export default function App() {
     if (typeof snapshot.designContext === 'string') {
       setDesignContext(snapshot.designContext)
     }
+    if (typeof snapshot.workspaceMode === 'string') {
+      setWorkspaceMode(snapshot.workspaceMode)
+    }
+    if (snapshot.gameBlueprint && typeof snapshot.gameBlueprint === 'object') {
+      setGameBlueprint(snapshot.gameBlueprint)
+    }
   }, [])
 
   useEffect(() => {
@@ -247,7 +259,9 @@ export default function App() {
         screens,
         assets,
         layoutByScreen,
-        designContext
+        designContext,
+        workspaceMode,
+        gameBlueprint
       })
     }, 300)
 
@@ -269,6 +283,23 @@ export default function App() {
     setMessages(m => [...m, { role: 'user', content: userMessage }])
 
     try {
+      if (workspaceMode === 'game-build') {
+        setMessages(m => [...m, { role: 'assistant', content: 'Analyzing game PRD...' }])
+        const response = await generateBlueprint({ prdText: userMessage, sessionId: 'default' })
+        const blueprint = response?.blueprint || response
+        setGameBlueprint(blueprint)
+        setPendingBuild({ prdText: userMessage, blueprint })
+        setMessages(m => [
+          ...m,
+          {
+            role: 'assistant',
+            type: 'build_prompt',
+            content: 'Blueprint ready. Start build?'
+          }
+        ])
+        return
+      }
+
       const res = await fetch(`${API_BASE_URL}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -307,6 +338,26 @@ export default function App() {
     }
   }
 
+  async function handleConfirmBuild() {
+    if (!pendingBuild || isStartingBuild) return
+    setIsStartingBuild(true)
+    try {
+      await startGameBuild({ sessionId: 'default', blueprint: pendingBuild.blueprint })
+      setMessages(m => [...m, { role: 'assistant', content: 'Build started. Streaming logs on the right.' }])
+      setPendingBuild(null)
+    } catch (error) {
+      console.error('Error starting build:', error)
+      setMessages(m => [...m, { role: 'assistant', content: 'Failed to start build. Please try again.' }])
+    } finally {
+      setIsStartingBuild(false)
+    }
+  }
+
+  function handleCancelBuild() {
+    setPendingBuild(null)
+    setMessages(m => [...m, { role: 'assistant', content: 'Build cancelled. Send a new PRD when ready.' }])
+  }
+
   function handleAnnotationLog({ assetName, instruction }) {
     const summary = `Annotate: ${assetName}\nInstruction: ${instruction}`
     setMessages(m => [...m, { role: 'user', content: summary }])
@@ -325,6 +376,9 @@ export default function App() {
     setAssets({})
     setDesignContext(null)
     setLayoutByScreen({})
+    setGameBlueprint(null)
+    setPendingBuild(null)
+    setWorkspaceMode('layout')
     window.localStorage.removeItem(WORKSPACE_STORAGE_KEY)
     fetch(`${API_BASE_URL}/api/chat/clear`, {
       method: 'POST',
@@ -453,26 +507,83 @@ export default function App() {
               </div>
             </div>
           )}
-          {messages.map((m, i) => (
-            <div 
-              key={i} 
-              style={{
-                alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-                maxWidth: '80%',
-                padding: '12px 16px',
-                borderRadius: '12px',
-                backgroundColor: m.role === 'user' ? colors.accentBlue : colors.surfaceElevated,
-                color: m.role === 'user' ? '#fff' : colors.text,
-                border: m.role === 'assistant' ? `1px solid ${colors.border}` : 'none',
-                boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
-                fontSize: '14px',
-                lineHeight: '1.5',
-                fontFamily: nexverseFont
-              }}
-            >
-              {m.content}
-            </div>
-          ))}
+          {messages.map((m, i) => {
+            if (m.type === 'build_prompt') {
+              return (
+                <div
+                  key={i}
+                  style={{
+                    alignSelf: 'flex-start',
+                    maxWidth: '85%',
+                    padding: '12px 16px',
+                    borderRadius: '12px',
+                    backgroundColor: colors.surfaceElevated,
+                    color: colors.text,
+                    border: `1px solid ${colors.border}`,
+                    boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+                    fontSize: '14px',
+                    lineHeight: '1.5',
+                    fontFamily: nexverseFont
+                  }}
+                >
+                  <div style={{ marginBottom: '10px' }}>{m.content}</div>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button
+                      onClick={handleConfirmBuild}
+                      disabled={isStartingBuild}
+                      style={{
+                        padding: '8px 12px',
+                        borderRadius: '8px',
+                        border: 'none',
+                        background: isStartingBuild ? colors.textMuted : colors.accentBlue,
+                        color: '#fff',
+                        fontWeight: 600,
+                        cursor: isStartingBuild ? 'not-allowed' : 'pointer'
+                      }}
+                    >
+                      ✅ Build
+                    </button>
+                    <button
+                      onClick={handleCancelBuild}
+                      disabled={isStartingBuild}
+                      style={{
+                        padding: '8px 12px',
+                        borderRadius: '8px',
+                        border: `1px solid ${colors.border}`,
+                        background: colors.surface,
+                        color: colors.textSecondary,
+                        fontWeight: 600,
+                        cursor: isStartingBuild ? 'not-allowed' : 'pointer'
+                      }}
+                    >
+                      ❌ Cancel
+                    </button>
+                  </div>
+                </div>
+              )
+            }
+
+            return (
+              <div 
+                key={i} 
+                style={{
+                  alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
+                  maxWidth: '80%',
+                  padding: '12px 16px',
+                  borderRadius: '12px',
+                  backgroundColor: m.role === 'user' ? colors.accentBlue : colors.surfaceElevated,
+                  color: m.role === 'user' ? '#fff' : colors.text,
+                  border: m.role === 'assistant' ? `1px solid ${colors.border}` : 'none',
+                  boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+                  fontSize: '14px',
+                  lineHeight: '1.5',
+                  fontFamily: nexverseFont
+                }}
+              >
+                {m.content}
+              </div>
+            )
+          })}
           {loading && (
             <div style={{
               alignSelf: 'flex-start',
@@ -578,9 +689,9 @@ export default function App() {
               fontFamily: nexverseFont,
               textTransform: 'uppercase'
             }}>
-              Layout Workspace
+              {workspaceMode === 'game-build' ? 'Game Build Mode' : 'Layout Workspace'}
             </h3>
-            {screens.length > 0 && (
+            {workspaceMode !== 'game-build' && screens.length > 0 && (
               <div style={{ 
                 fontSize: '0.75em', 
                 color: colors.textMuted, 
@@ -605,6 +716,39 @@ export default function App() {
               {saveNotice}
             </div>
           )}
+          {workspaceMode !== 'game-build' ? (
+            <button
+              onClick={() => setWorkspaceMode('game-build')}
+              style={{
+                marginLeft: '12px',
+                padding: '8px 12px',
+                borderRadius: '8px',
+                border: `1px solid ${colors.border}`,
+                background: '#0f172a',
+                color: '#f8fafc',
+                fontWeight: 600,
+                cursor: 'pointer'
+              }}
+            >
+              🚀 Enter Game Build Mode
+            </button>
+          ) : (
+            <button
+              onClick={() => setWorkspaceMode('layout')}
+              style={{
+                marginLeft: '12px',
+                padding: '8px 12px',
+                borderRadius: '8px',
+                border: `1px solid ${colors.border}`,
+                background: colors.surface,
+                color: colors.textSecondary,
+                fontWeight: 600,
+                cursor: 'pointer'
+              }}
+            >
+              Exit Game Build Mode
+            </button>
+          )}
         </div>
         
         <div style={{ 
@@ -618,7 +762,9 @@ export default function App() {
               <WorkspaceGeneratingCard />
             </div>
           )}
-          {screens.length === 0 && Object.keys(assets).length === 0 ? (
+          {workspaceMode === 'game-build' ? (
+            <GameBuildPanel sessionId="default" blueprint={gameBlueprint} />
+          ) : screens.length === 0 && Object.keys(assets).length === 0 ? (
             <div style={{ 
               color: colors.textSecondary, 
               textAlign: 'center', 

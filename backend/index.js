@@ -14,6 +14,10 @@ import {
 } from "./sessions.js"
 import { saveLayoutFile } from "./utils/layoutStorage.js"
 import { editAsset } from "./services/editAssetService.js"
+import { generateGameBlueprint } from "./services/gameBuild/GameBlueprintService.js"
+import { runGameBuild } from "./services/gameBuild/GameBuildOrchestrator.js"
+import { appendBuildLog, updateBuildStatus } from "./services/gameBuild/GameBuildStore.js"
+import { handleGameBuildStream } from "./services/gameBuild/GameBuildStream.js"
 
 
 
@@ -142,6 +146,52 @@ app.post("/api/layout/save", (req, res) => {
     })
   }
 })
+
+/**
+ * Game build: generate blueprint
+ */
+app.post("/api/game-build/blueprint", (req, res) => {
+  try {
+    const { prdText, sessionId = "default" } = req.body || {}
+    if (!prdText) {
+      return res.status(400).json({ error: "prdText is required" })
+    }
+    const blueprint = generateGameBlueprint({ sessionId, prdText })
+    res.json({ blueprint })
+  } catch (error) {
+    console.error("Error generating blueprint:", error)
+    res.status(500).json({
+      error: "Failed to generate blueprint",
+      message: error.message
+    })
+  }
+})
+
+/**
+ * Game build: start build
+ */
+app.post("/api/game-build/start", async (req, res) => {
+  const { sessionId = "default", blueprint } = req.body || {}
+  if (!blueprint) {
+    return res.status(400).json({ error: "blueprint is required" })
+  }
+
+  updateBuildStatus(sessionId, "queued")
+  appendBuildLog(sessionId, "INFO", "Build queued...")
+
+  runGameBuild({ sessionId, blueprint }).catch((error) => {
+    console.error("Game build failed:", error)
+    appendBuildLog(sessionId, "ERROR", error.message || "Game build failed")
+    updateBuildStatus(sessionId, "error")
+  })
+
+  res.json({ success: true })
+}) 
+
+/**
+ * Game build: stream logs (SSE)
+ */
+app.get("/api/game-build/stream", handleGameBuildStream)
 
 app.listen(3001, () => {
   console.log("Backend running on http://localhost:3001")

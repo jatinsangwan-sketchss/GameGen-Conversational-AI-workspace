@@ -1,0 +1,40 @@
+{
+  "elements": [
+    {
+      "asset": "gameplay_screen_gameplay_background",
+      "xPercent": -0.01616087900684774,
+      "yPercent": -0.004323028178869496,
+      "widthPercent": 0.7501777014514007,
+      "heightPercent": 0.7204795789364546,
+      "rotation": 0,
+      "zIndex": 1
+    },
+    {
+      "asset": "gameplay_screen_score_label_text",
+      "xPercent": 0.044975429416969304,
+      "yPercent": 0.03871745782640914,
+      "widthPercent": 0.19977175703534852,
+      "heightPercent": 0.043505786122744645,
+      "rotation": 0,
+      "zIndex": 2
+    },
+    {
+      "asset": "gameplay_screen_timer_label_text",
+      "xPercent": 0.47486252372158355,
+      "yPercent": 0.04732085726759397,
+      "widthPercent": 0.1708924327912952,
+      "heightPercent": 0.03298783171462199,
+      "rotation": 0,
+      "zIndex": 3
+    },
+    {
+      "asset": "gameplay_screen_tap_button_center",
+      "xPercent": 0.21997385821083296,
+      "yPercent": 0.57224079658948,
+      "widthPercent": 0.22525351372127664,
+      "heightPercent": 0.10374497955108439,
+      "rotation": 0,
+      "zIndex": 4
+    }
+  ]
+}

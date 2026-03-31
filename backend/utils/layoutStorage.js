@@ -25,3 +25,16 @@ export function saveLayoutFile({ gameName, screenName, elements }) {
   fs.writeFileSync(filePath, JSON.stringify({ elements }, null, 2))
   return filePath
 }
+
+export function readLayoutFile(gameName, screenName) {
+  const filePath = buildLayoutFilePath(gameName, screenName)
+  if (!fs.existsSync(filePath)) {
+    return null
+  }
+  const raw = fs.readFileSync(filePath, "utf-8")
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}

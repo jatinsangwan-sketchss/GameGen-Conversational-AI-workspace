@@ -1,0 +1,58 @@
+{
+  "elements": [
+    {
+      "asset": "game_over_screen_gameover_background",
+      "xPercent": -0.002582932540607017,
+      "yPercent": 0.0052472328043838565,
+      "widthPercent": 0.7314910798817198,
+      "heightPercent": 0.7051807361610037,
+      "rotation": 0,
+      "zIndex": 1
+    },
+    {
+      "asset": "game_over_screen_btn_home_button_container_container",
+      "xPercent": 0.17577040462049986,
+      "yPercent": 0.5464040457101338,
+      "widthPercent": 0.1912778381400392,
+      "heightPercent": 0.11330675628574073,
+      "rotation": 0,
+      "zIndex": 4
+    },
+    {
+      "asset": "game_over_screen_icon_home_button_container",
+      "xPercent": 0.185970691151028,
+      "yPercent": 0.5578813201060183,
+      "widthPercent": 0.17089243279129643,
+      "heightPercent": 0.0760158270205775,
+      "rotation": 0,
+      "zIndex": 5
+    },
+    {
+      "asset": "game_over_screen_home_button_icon",
+      "xPercent": 0.18090846716654524,
+      "yPercent": 0.5550134941063368,
+      "widthPercent": 0.18108513546566904,
+      "heightPercent": 0.08366524840830387,
+      "rotation": 0,
+      "zIndex": 6
+    },
+    {
+      "asset": "game_over_screen_btn_retry_shell",
+      "xPercent": 0.09088999055261851,
+      "yPercent": 0.3704888000875102,
+      "widthPercent": 0.5106491886036743,
+      "heightPercent": 0.11999999999999984,
+      "rotation": 0,
+      "zIndex": 7
+    },
+    {
+      "asset": "game_over_screen_final_score_text",
+      "xPercent": 0.08064894079524922,
+      "yPercent": 0.16587039162729122,
+      "widthPercent": 0.5174443237199219,
+      "heightPercent": 0.09322702514296068,
+      "rotation": 0,
+      "zIndex": 8
+    }
+  ]
+}
