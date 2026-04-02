@@ -1,7 +1,12 @@
 import { getSession } from "../../sessions.js"
 import { buildLayoutFilePath, readLayoutFile } from "../../utils/layoutStorage.js"
 import path from "path"
-import { recordBlueprint, appendBuildLog, setBuildContext } from "./GameBuildStore.js"
+import {
+  recordBlueprint,
+  appendBuildLog,
+  appendReasoningChunk,
+  setBuildContext
+} from "./GameBuildStore.js"
 
 function normalizeName(value) {
   return String(value || "game_ui")
@@ -44,15 +49,32 @@ function buildSceneBlueprint({ screens = [], gameName, assets, layouts }) {
   }))
 }
 
+function emitReasoning(sessionId, text) {
+  const chunks = String(text || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+  chunks.forEach((chunk) => appendReasoningChunk(sessionId, chunk))
+}
+
 export function generateGameBlueprint({ sessionId, prdText }) {
   const session = getSession(sessionId)
   const gameName = session?.gameName || "game_ui"
   const screens = session?.screensMetadata || []
   const assets = buildAssetManifest(session?.assets || {})
 
+  emitReasoning(sessionId, "Analyzing gameplay PRD for scenes, mechanics, and rules.")
+  emitReasoning(sessionId, `Detected ${screens.length} UI screen(s) in session.`)
+  emitReasoning(sessionId, `Located ${assets.length} asset(s) across screens.`)
+
   const layouts = {}
   screens.forEach((screen) => {
     layouts[screen.name] = readLayoutFile(gameName, screen.name)
+    if (!layouts[screen.name]) {
+      emitReasoning(sessionId, `No layout JSON found for ${screen.name}.`)
+    } else {
+      emitReasoning(sessionId, `Loaded layout JSON for ${screen.name}.`)
+    }
   })
 
   const blueprint = {
@@ -88,6 +110,8 @@ export function generateGameBlueprint({ sessionId, prdText }) {
   recordBlueprint(sessionId, blueprint)
   setBuildContext(sessionId, { assets, layouts })
   appendBuildLog(sessionId, "INFO", "Generating Game Blueprint...")
+
+  emitReasoning(sessionId, "Blueprint assembled. Awaiting HITL confirmation.")
 
   return blueprint
 }

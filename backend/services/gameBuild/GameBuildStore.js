@@ -7,6 +7,7 @@ function createSession(sessionId) {
     sessionId,
     status: "idle",
     logs: [],
+    reasoning: [],
     blueprintHistory: [],
     buildHistory: [],
     latestBlueprint: null,
@@ -33,6 +34,17 @@ export function appendBuildLog(sessionId, level, message) {
   }
   session.logs.push(payload)
   session.emitter.emit("log", payload)
+  return payload
+}
+
+export function appendReasoningChunk(sessionId, chunk) {
+  const session = getBuildSession(sessionId)
+  const payload = {
+    timestamp: new Date().toISOString(),
+    chunk
+  }
+  session.reasoning.push(payload)
+  session.emitter.emit("reasoning", payload)
   return payload
 }
 
@@ -70,4 +82,9 @@ export function recordBuildRun(sessionId, blueprint) {
 export function getBuildLogs(sessionId) {
   const session = getBuildSession(sessionId)
   return session.logs
+}
+
+export function getBuildReasoning(sessionId) {
+  const session = getBuildSession(sessionId)
+  return session.reasoning
 }

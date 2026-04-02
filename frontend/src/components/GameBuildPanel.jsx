@@ -18,7 +18,9 @@ function formatTimestamp(value) {
 export default function GameBuildPanel({ sessionId = 'default', blueprint }) {
   const [buildStatus, setBuildStatus] = useState('idle')
   const [logs, setLogs] = useState([])
+  const [reasoning, setReasoning] = useState([])
   const logEndRef = useRef(null)
+  const reasoningEndRef = useRef(null)
 
   const statusLabel = useMemo(() => {
     if (buildStatus === 'idle') return 'Idle'
@@ -34,6 +36,10 @@ export default function GameBuildPanel({ sessionId = 'default', blueprint }) {
   }, [logs])
 
   useEffect(() => {
+    reasoningEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [reasoning])
+
+  useEffect(() => {
     const url = `${API_BASE_URL}/api/game-build/stream?sessionId=${encodeURIComponent(sessionId)}`
     const eventSource = new EventSource(url)
 
@@ -45,6 +51,19 @@ export default function GameBuildPanel({ sessionId = 'default', blueprint }) {
         setLogs((prev) => [
           ...prev,
           { level: 'INFO', message: event.data, timestamp: new Date().toISOString() }
+        ])
+      }
+    })
+
+    eventSource.addEventListener('reasoning', (event) => {
+      try {
+        const payload = JSON.parse(event.data)
+        if (!payload?.chunk) return
+        setReasoning((prev) => [...prev, payload])
+      } catch {
+        setReasoning((prev) => [
+          ...prev,
+          { chunk: event.data, timestamp: new Date().toISOString() }
         ])
       }
     })
@@ -99,6 +118,32 @@ export default function GameBuildPanel({ sessionId = 'default', blueprint }) {
             }} />
             {statusLabel}
           </div>
+        </div>
+
+        <div style={{
+          border: '1px solid #1f2937',
+          borderRadius: '10px',
+          background: '#05070d',
+          padding: '12px',
+          overflowY: 'auto',
+          fontSize: '12px',
+          color: '#e5e7eb',
+          maxHeight: '220px'
+        }}>
+          {reasoning.length === 0 ? (
+            <div style={{ color: '#64748b' }}>Reasoning will appear here during PRD analysis.</div>
+          ) : (
+            reasoning.map((item, index) => (
+              <div key={`${item.timestamp}-${index}`} style={{ marginBottom: '6px' }}>
+                <span style={{ color: '#94a3b8', marginRight: '6px' }}>
+                  [{formatTimestamp(item.timestamp)}]
+                </span>
+                <span style={{ color: '#facc15', marginRight: '6px' }}>[AI]</span>
+                <span>{item.chunk}</span>
+              </div>
+            ))
+          )}
+          <div ref={reasoningEndRef} />
         </div>
 
         <div style={{

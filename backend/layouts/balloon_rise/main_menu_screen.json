@@ -1,0 +1,103 @@
+{
+  "elements": [
+    {
+      "asset": "main_menu_screen_bg_default_sky",
+      "xPercent": -0.002522261691354831,
+      "yPercent": -0.0014478177405954965,
+      "widthPercent": 0.7552740527885852,
+      "heightPercent": 0.7137863352221948,
+      "rotation": 0,
+      "zIndex": 1
+    },
+    {
+      "asset": "main_menu_screen_text_title",
+      "xPercent": 0.10112630039988993,
+      "yPercent": 0.0817410538923521,
+      "widthPercent": 0.5344321615105405,
+      "heightPercent": 0.14677297485703947,
+      "rotation": 0,
+      "zIndex": 2
+    },
+    {
+      "asset": "main_menu_screen_btn_play_container",
+      "xPercent": 0.16904731613773932,
+      "yPercent": 0.2538383447968474,
+      "widthPercent": 0.44269783744119845,
+      "heightPercent": 0.10852586791841132,
+      "rotation": 0,
+      "zIndex": 3
+    },
+    {
+      "asset": "main_menu_screen_text_play",
+      "xPercent": 0.23868038740292463,
+      "yPercent": 0.2643573204571162,
+      "widthPercent": 0.2966024324418761,
+      "heightPercent": 0.07314729400018138,
+      "rotation": 0,
+      "zIndex": 4
+    },
+    {
+      "asset": "main_menu_screen_btn_shop_container",
+      "xPercent": 0.16394053699833847,
+      "yPercent": 0.38864659182475814,
+      "widthPercent": 0.4596856752318177,
+      "heightPercent": 0.10661351257148055,
+      "rotation": 0,
+      "zIndex": 5
+    },
+    {
+      "asset": "main_menu_screen_text_shop",
+      "xPercent": 0.23188904421475542,
+      "yPercent": 0.3991658031585996,
+      "widthPercent": 0.32887932424405203,
+      "heightPercent": 0.07219111632671474,
+      "rotation": 0,
+      "zIndex": 6
+    },
+    {
+      "asset": "main_menu_screen_btn_sound_container",
+      "xPercent": 0.14004759817720233,
+      "yPercent": 0.5607491461056988,
+      "widthPercent": 0.2065668921515965,
+      "heightPercent": 0.09609555816335719,
+      "rotation": 0,
+      "zIndex": 7
+    },
+    {
+      "asset": "main_menu_screen_icon_sound",
+      "xPercent": 0.16385332265253846,
+      "yPercent": 0.5655297987994549,
+      "widthPercent": 0.14541067610536793,
+      "heightPercent": 0.07888436004097515,
+      "rotation": 0,
+      "zIndex": 8
+    },
+    {
+      "asset": "main_menu_screen_btn_container_container",
+      "xPercent": 0.4460220667403337,
+      "yPercent": 0.5645734640102743,
+      "widthPercent": 0.203169324593473,
+      "heightPercent": 0.09131466979602952,
+      "rotation": 0,
+      "zIndex": 9
+    },
+    {
+      "asset": "main_menu_screen_icon_container",
+      "xPercent": 0.46466034122701655,
+      "yPercent": 0.5703069949474856,
+      "widthPercent": 0.14710945988442836,
+      "heightPercent": 0.0731472940001821,
+      "rotation": 0,
+      "zIndex": 10
+    },
+    {
+      "asset": "main_menu_screen_icon_settings",
+      "xPercent": 0.4613111207518907,
+      "yPercent": 0.5693589872911876,
+      "widthPercent": 0.1657960814541089,
+      "heightPercent": 0.07697200469404368,
+      "rotation": 0,
+      "zIndex": 11
+    }
+  ]
+}
