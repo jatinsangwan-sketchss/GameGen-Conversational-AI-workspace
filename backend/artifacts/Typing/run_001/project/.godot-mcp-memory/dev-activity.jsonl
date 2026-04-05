@@ -1,9 +1,0 @@
-{"ts":"2026-03-27T03:56:53.124Z","actor":"mcp-server","action":"capture_intent_snapshot","intent_id":"intent_1774583813122","result":"success"}
-{"ts":"2026-03-27T03:56:53.127Z","actor":"mcp-server","action":"record_execution_trace","intent_id":"intent_1774583813122","result":"test","summary":"test:test"}
-{"ts":"2026-03-27T03:56:53.128Z","actor":"mcp-server","action":"record_execution_trace","intent_id":"intent_1774583813122","result":"test","summary":"test:test"}
-{"ts":"2026-03-27T06:40:37.718Z","actor":"mcp-server","action":"capture_intent_snapshot","intent_id":"intent_1774593637716","result":"success"}
-{"ts":"2026-03-27T06:40:37.721Z","actor":"mcp-server","action":"record_execution_trace","intent_id":"intent_1774593637716","result":"test","summary":"test:test"}
-{"ts":"2026-03-27T06:40:37.722Z","actor":"mcp-server","action":"record_execution_trace","intent_id":"intent_1774593637716","result":"test","summary":"test:test"}
-{"ts":"2026-03-27T06:51:50.265Z","actor":"mcp-server","action":"capture_intent_snapshot","intent_id":"intent_1774594310264","result":"success"}
-{"ts":"2026-03-27T06:51:50.268Z","actor":"mcp-server","action":"record_execution_trace","intent_id":"intent_1774594310264","result":"test","summary":"test:test"}
-{"ts":"2026-03-27T06:51:50.269Z","actor":"mcp-server","action":"record_execution_trace","intent_id":"intent_1774594310264","result":"test","summary":"test:test"}

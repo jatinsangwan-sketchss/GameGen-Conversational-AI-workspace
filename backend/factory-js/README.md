@@ -29,3 +29,41 @@ Anything under `backend/factory-js/experimental/` is explicitly out of scope for
 - Prototype scope + “core vs experimental” guidance: `PROTOTYPE_CUTLIST.md`
 - Exact supported/unsupported capabilities: `PROTOTYPE_CAPABILITY_MATRIX.md`
 
+## Local usage (generic-mcp sidecar)
+
+Start the local HTTP sidecar:
+
+```bash
+node ./factory-js/generic-mcp/run-generic-mcp-server.js \
+  --client-module "./factory-js/generic-mcp/adapters/stdio-mcp-client.js"
+```
+
+Health check:
+
+```bash
+curl -s http://127.0.0.1:4318/health
+```
+
+Run a new request:
+
+```bash
+curl -s http://127.0.0.1:4318/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input":"create a gdscript called Logs and attach it to root node of NewScene.tscn. This script should print Hello world in the console",
+    "projectPath":"/absolute/project/path",
+    "sessionId":"optional"
+  }'
+```
+
+Resume a pending semantic clarification:
+
+```bash
+curl -s http://127.0.0.1:4318/resume \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sessionId":"required",
+    "input":"res://NewScene.tscn"
+  }'
+```
+
