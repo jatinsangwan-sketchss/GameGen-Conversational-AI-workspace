@@ -15,6 +15,8 @@
  * - argument/path resolution
  * - result formatting
  */
+import fs from "node:fs/promises";
+import path from "node:path";
 import { ArtifactRegistry } from "./ArtifactRegistry.js";
 import { coercePropertyLikeArgs } from "./PropertyValueCoercer.js";
 
@@ -118,6 +120,29 @@ function pickFirstText(values = []) {
 function toGodotPath(value) {
   const rel = normalizeRef(value);
   return rel ? `res://${rel}` : null;
+}
+const VERIFIABLE_ARTIFACT_EXTENSIONS = new Set([
+  ".tscn",
+  ".gd",
+  ".tres",
+  ".res",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".webp",
+  ".shader",
+  ".gdshader",
+]);
+
+function hasVerifiableArtifactExtension(candidate) {
+  const rel = normalizeRef(candidate);
+  if (!rel) return false;
+  const ext = path.extname(rel).toLowerCase();
+  return VERIFIABLE_ARTIFACT_EXTENSIONS.has(ext);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export class Executor {
@@ -235,6 +260,18 @@ export class Executor {
     const rawResult = await this._callTool(client, { toolName, args: toArgs(args), payload });
     let ok = isRawResultOk(rawResult);
     let error = ok ? null : this.extractFailureText(rawResult);
+    if (ok) {
+      const creationVerification = await this._verifyArtifactFilesExist({
+        toolName,
+        args: toArgs(args),
+        rawResult,
+        workflowState,
+      });
+      if (!creationVerification.ok) {
+        ok = false;
+        error = creationVerification.reason || "Creation verification failed.";
+      }
+    }
     if (ok) {
       const attachVerification = await this._verifyAttachApplied({
         toolName,
@@ -356,6 +393,9 @@ export class Executor {
   async _verifyAttachApplied({ args, client, inventory, workflowState }) {
     if (!isAttachMode(workflowState)) return { ok: true };
     const scriptTarget = pickFirstText([args.scriptPath, args.scriptRef]);
+    if (!scriptTarget) {
+      return { ok: true };
+    }
     const nodeTarget = pickFirstText([args.nodePath, args.targetNodePath, args.targetNode, args.nodeRef, args.targetNodeRef]);
     const sceneTarget = pickFirstText([args.scenePath, args.sceneRef]);
     if (!scriptTarget || !nodeTarget || !sceneTarget) {
@@ -393,6 +433,92 @@ export class Executor {
     return {
       ok: false,
       reason: `Attach verification failed: expected script ${expectedPath} but node reports ${actualPath}.`,
+    };
+  }
+
+  _expectsArtifactCreation({ toolName, workflowState }) {
+    const expected = workflowState?.artifactOperation?.expectedEffects;
+    if (isPlainObject(expected) && typeof expected.artifactCreated === "boolean") {
+      return expected.artifactCreated;
+    }
+    return /create|new|generate|scaffold|save|write/i.test(safeString(toolName));
+  }
+
+  _resolveProjectRootForVerification(args = {}) {
+    const a = toArgs(args);
+    const fromArgs = pickFirstText([a.projectPath, a.project_path, a.projectRoot, a.project_root]);
+    if (fromArgs) return path.resolve(fromArgs);
+    const fromIndex = this._fileIndex && typeof this._fileIndex.getProjectRoot === "function"
+      ? safeString(this._fileIndex.getProjectRoot()).trim()
+      : "";
+    return fromIndex ? path.resolve(fromIndex) : null;
+  }
+
+  _toAbsoluteArtifactCandidate(candidate, projectRoot) {
+    const raw = safeString(candidate).trim();
+    if (!raw || !hasVerifiableArtifactExtension(raw)) return null;
+    if (path.isAbsolute(raw)) return path.normalize(raw);
+    const rel = normalizeRef(raw);
+    if (!rel || !projectRoot) return null;
+    return path.resolve(projectRoot, rel);
+  }
+
+  _collectVerifiableArtifactCandidates({ args = {}, rawResult = null, projectRoot = null } = {}) {
+    const uniq = new Set();
+    const push = (value) => {
+      const abs = this._toAbsoluteArtifactCandidate(value, projectRoot);
+      if (abs) uniq.add(abs);
+    };
+    for (const c of collectPathLikeStrings(args)) push(c);
+    for (const c of collectPathLikeStrings(rawResult)) push(c);
+    return [...uniq];
+  }
+
+  async _pathExists(absPath) {
+    try {
+      const st = await fs.stat(absPath);
+      return st.isFile();
+    } catch {
+      return false;
+    }
+  }
+
+  async _pathExistsViaIndexOrFs(absPath, projectRoot = null) {
+    const fi = this._fileIndex;
+    if (fi && typeof fi.addOrUpdateRelativePath === "function" && projectRoot) {
+      const relPath = path.relative(projectRoot, absPath).split(path.sep).join("/");
+      if (relPath && !relPath.startsWith("..") && !path.isAbsolute(relPath)) {
+        const upsert = await fi.addOrUpdateRelativePath(relPath);
+        if (upsert?.ok) return true;
+      }
+    }
+    return this._pathExists(absPath);
+  }
+
+  async _verifyArtifactFilesExist({ toolName, args = {}, rawResult = null, workflowState = null } = {}) {
+    if (!this._expectsArtifactCreation({ toolName, workflowState })) return { ok: true };
+    const projectRoot = this._resolveProjectRootForVerification(args);
+    if (!projectRoot) {
+      return { ok: false, reason: "Creation verification failed: missing project root for artifact existence checks." };
+    }
+    const candidates = this._collectVerifiableArtifactCandidates({ args, rawResult, projectRoot });
+    if (candidates.length < 1) {
+      return { ok: false, reason: "Creation verification failed: no verifiable artifact path found in tool args/result." };
+    }
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      for (const abs of candidates) {
+        const existsNow = await this._pathExistsViaIndexOrFs(abs, projectRoot);
+        if (existsNow) {
+          return { ok: true };
+        }
+      }
+      if (attempt < 5) await sleep(120);
+    }
+
+    const pretty = candidates.map((p) => path.relative(projectRoot, p) || p);
+    return {
+      ok: false,
+      reason: `Creation verification failed: expected artifact path(s) do not exist on disk (${pretty.join(", ")}).`,
     };
   }
 

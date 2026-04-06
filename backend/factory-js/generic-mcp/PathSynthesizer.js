@@ -42,10 +42,12 @@ export function extractCreationIntent(args) {
     requestedName: firstNonEmpty(
       a.requestedName,
       a.requested_name,
+      a.name,
       a.sceneName,
       a.fileName,
       a.resourceName,
       c.requestedName,
+      c.requested_name,
       c.name
     ),
     targetFolder: firstNonEmpty(a.targetFolder, a.target_folder, a.folder, a.directory, c.targetFolder, c.folder),

@@ -567,6 +567,9 @@ export class SessionManager {
       }
 
       lastDetail = pred.detail;
+      console.error(
+        `[generic-mcp] bridge readiness attempt ${attempt}/${this._bridgeMaxAttempts} (${label}): ${lastDetail}`
+      );
       if (this._debug) {
         this._log(
           `Bridge/project readiness attempt ${attempt}/${this._bridgeMaxAttempts} (${label}): ${lastDetail}`,

@@ -74,6 +74,12 @@ export function buildGenericMcpServerConfig({ argv = [], env = process.env } = {
   const debug =
     hasArg(argv, "--debug") ||
     parseBool(env.GENERIC_MCP_HTTP_DEBUG, false);
+  const autoInitializeOnStart =
+    hasArg(argv, "--no-auto-init")
+      ? false
+      : hasArg(argv, "--auto-init")
+        ? true
+        : parseBool(env.GENERIC_MCP_AUTO_INIT_ON_START, true);
 
   const modelTimeoutMs = toInt(
     getArg(argv, "--model-timeout-ms") ?? env.GENERIC_MCP_MODEL_TIMEOUT_MS,
@@ -87,6 +93,7 @@ export function buildGenericMcpServerConfig({ argv = [], env = process.env } = {
     maxBodyBytes,
     maxSessions,
     debug,
+    autoInitializeOnStart,
     clientModulePath: resolveClientModulePath({ argv, env }),
     defaultProjectPath: defaultProjectPathRaw ? path.resolve(defaultProjectPathRaw) : null,
     mcpConfigPath: safeString(getArg(argv, "--mcp-config-path")).trim() || null,
@@ -121,12 +128,15 @@ export function genericMcpServerUsage() {
     "  --model-base-url <url>         Live model base URL override",
     "  --model-api-key <key>          Live model API key override",
     "  --model-timeout-ms <ms>        Live model timeout override",
+    "  --auto-init                    Auto-start MCP bridge readiness gate on sidecar boot (default: on)",
+    "  --no-auto-init                 Disable startup auto-init gate",
     "  --debug                        Enable debug logging",
     "  --help                         Show help",
     "",
     "Routes:",
     "  GET  /health",
-    "  POST /run    { input, projectPath, sessionId? }",
+    "  GET  /ready   (optional query: ?projectPath=/abs/path)",
+    "  POST /run    { input, projectPath?, sessionId? }",
     "  POST /resume { sessionId, input, projectPath? }",
   ].join("\n");
 }

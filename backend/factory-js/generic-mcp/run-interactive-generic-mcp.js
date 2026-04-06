@@ -445,19 +445,18 @@ async function main() {
         continue;
       }
 
+      const shouldResumePending =
+        pendingNeedsInput &&
+        (safeString(pendingNeedsInput?.status).trim() === "paused" || isLikelyClarificationAnswer(trimmed));
       const runResult = await runner.run({
         userRequest: trimmed,
         projectRoot,
         mcpConfig,
         sessionContext,
-        resumeNeedsInput:
-          pendingNeedsInput &&
-          isLikelyClarificationAnswer(trimmed)
-            ? pendingNeedsInput
-            : null,
+        resumeNeedsInput: shouldResumePending ? pendingNeedsInput : null,
       });
 
-      if (runResult.status === "needs_input") {
+      if (runResult.status === "needs_input" || runResult.status === "paused") {
         pendingNeedsInput = runResult;
         console.log(formatNeedsInputForCli(runResult));
       } else {

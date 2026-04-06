@@ -24,8 +24,12 @@ function unique(arr) {
   return [...new Set(arr)];
 }
 
+function isPlainObject(value) {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
 export class NodeResolver {
-  constructor({ sessionManager, inventory }) {
+  constructor({ sessionManager, inventory } = {}) {
     this._sessionManager = sessionManager ?? null;
     this._inventory = inventory ?? null;
   }
@@ -77,7 +81,15 @@ export class NodeResolver {
     const toolName = this._pickListSceneNodesToolName();
     if (!toolName) return { ok: false, error: "No list-scene-nodes tool in inventory." };
 
-    const args = this._buildListArgs(scenePath);
+    const sessionStatus = this._sessionManager && typeof this._sessionManager.getStatus === "function"
+      ? this._sessionManager.getStatus()
+      : {};
+    const activeProjectPath = normalize(
+      sessionStatus?.connectedProjectPath ||
+      sessionStatus?.desiredProjectRoot ||
+      ""
+    ) || null;
+    const args = this._buildListArgs(scenePath, activeProjectPath);
     let raw = null;
     try {
       if (typeof client.callTool === "function") raw = await client.callTool(toolName, args);
@@ -89,6 +101,9 @@ export class NodeResolver {
       }
     } catch (err) {
       return { ok: false, error: safeString(err?.message ?? err) };
+    }
+    if (!this._isRawToolResultOk(raw)) {
+      return { ok: false, error: this._extractToolError(raw) };
     }
 
     const nodes = this._extractNodes(raw);
@@ -106,12 +121,39 @@ export class NodeResolver {
     return match?.name ?? null;
   }
 
-  _buildListArgs(scenePath) {
-    return {
+  _buildListArgs(scenePath, projectPath = null) {
+    const args = {
       scenePath,
       scene_path: scenePath,
       path: scenePath,
     };
+    const pp = normalize(projectPath);
+    if (pp) {
+      args.projectPath = pp;
+      args.project_path = pp;
+      args.projectRoot = pp;
+      args.project_root = pp;
+    }
+    return args;
+  }
+
+  _isRawToolResultOk(raw) {
+    if (!isPlainObject(raw)) return true;
+    if (raw.ok === false) return false;
+    if (raw.isError === true) return false;
+    if (raw.error != null) return false;
+    return true;
+  }
+
+  _extractToolError(raw) {
+    if (!isPlainObject(raw)) return safeString(raw) || "list_scene_nodes failed";
+    const direct = normalize(raw.error ?? raw.message ?? "");
+    if (direct) return direct;
+    if (Array.isArray(raw.content)) {
+      const text = raw.content.map((c) => normalize(c?.text)).filter(Boolean).join("\n");
+      if (text) return text;
+    }
+    return "list_scene_nodes failed";
   }
 
   _extractNodes(raw) {
@@ -145,12 +187,23 @@ export class NodeResolver {
         pushNode(item);
       }
     };
+    const walkTree = (node) => {
+      if (!isPlainObject(node)) return;
+      pushNode(node);
+      if (Array.isArray(node.children)) {
+        for (const child of node.children) {
+          walkTree(child);
+        }
+      }
+    };
 
     for (const c of candidates) {
       if (Array.isArray(c?.nodes)) walkArray(c.nodes);
       if (Array.isArray(c?.scene_nodes)) walkArray(c.scene_nodes);
       if (Array.isArray(c?.items)) walkArray(c.items);
       if (Array.isArray(c)) walkArray(c);
+      if (isPlainObject(c?.tree)) walkTree(c.tree);
+      if (isPlainObject(c) && Array.isArray(c.children)) walkTree(c);
     }
 
     return out;

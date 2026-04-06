@@ -10,6 +10,12 @@ function normalizeInput(value) {
   return safeString(value).trim();
 }
 
+function asStringArray(value) {
+  return Array.isArray(value)
+    ? value.map((v) => normalizeInput(v)).filter(Boolean)
+    : [];
+}
+
 export class GenericMcpHttpAdapterError extends Error {
   constructor(message, { httpStatus = 400, code = "bad_request", details = null } = {}) {
     super(message);
@@ -26,6 +32,7 @@ export class GenericMcpHttpAdapter {
     sessionStore,
     mcpConfig = null,
     defaultProjectPath = null,
+    sessionManager = null,
     debug = false,
   } = {}) {
     if (!runner || typeof runner.run !== "function") {
@@ -38,6 +45,7 @@ export class GenericMcpHttpAdapter {
     this._sessionStore = sessionStore;
     this._mcpConfig = mcpConfig;
     this._defaultProjectPath = normalizeInput(defaultProjectPath) || null;
+    this._sessionManager = sessionManager ?? null;
     this._startedAt = Date.now();
     this._debug = Boolean(debug);
   }
@@ -45,8 +53,12 @@ export class GenericMcpHttpAdapter {
   async handleRun(payload) {
     const body = this._validateObjectPayload(payload);
     const input = this._requireNonEmptyField(body, "input");
-    const projectPath = this._resolveProjectPath(body.projectPath);
+    const responseMode = this._resolveResponseMode(body);
     const rawSessionId = normalizeInput(body.sessionId) || null;
+    const existingSession = rawSessionId ? this._sessionStore.getSession(rawSessionId) : null;
+    const projectPath = this._resolveProjectPath(body.projectPath, {
+      sessionProjectPath: existingSession?.projectPath ?? null,
+    });
 
     const session = this._sessionStore.ensureSession(rawSessionId, { projectPath });
     const runResult = await this._runner.run({
@@ -60,17 +72,26 @@ export class GenericMcpHttpAdapter {
       resumeNeedsInput: null,
     });
 
-    this._sessionStore.setRunResult(session.sessionId, runResult, { projectPath });
-    return this._ok({
-      sessionId: session.sessionId,
-      ...runResult,
+    const resolvedProjectPath = this._resolveResultProjectPath(runResult, {
+      fallbackProjectPath: projectPath,
     });
+    this._sessionStore.setRunResult(session.sessionId, runResult, {
+      projectPath: resolvedProjectPath,
+    });
+    return this._ok(
+      this._buildRunResponseBody({
+        sessionId: session.sessionId,
+        runResult,
+        responseMode,
+      })
+    );
   }
 
   async handleResume(payload) {
     const body = this._validateObjectPayload(payload);
     const sessionId = this._requireNonEmptyField(body, "sessionId");
     const input = this._requireNonEmptyField(body, "input");
+    const responseMode = this._resolveResponseMode(body);
     const session = this._sessionStore.getSession(sessionId);
     if (!session) {
       throw new GenericMcpHttpAdapterError("Unknown sessionId for /resume.", {
@@ -87,7 +108,9 @@ export class GenericMcpHttpAdapter {
       });
     }
 
-    const projectPath = this._resolveProjectPath(body.projectPath || session.projectPath);
+    const projectPath = this._resolveProjectPath(body.projectPath || session.projectPath, {
+      sessionProjectPath: session.projectPath,
+    });
     const runResult = await this._runner.run({
       userRequest: input,
       projectRoot: projectPath,
@@ -99,24 +122,67 @@ export class GenericMcpHttpAdapter {
       resumeNeedsInput: pendingNeedsInput,
     });
 
-    this._sessionStore.setRunResult(sessionId, runResult, { projectPath });
-    return this._ok({
-      sessionId,
-      ...runResult,
+    const resolvedProjectPath = this._resolveResultProjectPath(runResult, {
+      fallbackProjectPath: projectPath,
     });
+    this._sessionStore.setRunResult(sessionId, runResult, {
+      projectPath: resolvedProjectPath,
+    });
+    return this._ok(
+      this._buildRunResponseBody({
+        sessionId,
+        runResult,
+        responseMode,
+      })
+    );
   }
 
   handleHealth() {
+    const mcp = this._buildReadinessSnapshot();
+    const status = !mcp.available
+      ? "healthy"
+      : mcp.ready
+        ? "healthy"
+        : mcp.lastError
+          ? "degraded"
+          : "starting";
     return this._ok({
       ok: true,
-      status: "healthy",
+      status,
+      ready: mcp.ready,
       uptimeSeconds: Math.floor((Date.now() - this._startedAt) / 1000),
       sidecar: {
         transport: "http",
         workflowSource: "GenericMcpRunner",
       },
+      mcp,
       sessions: this._sessionStore.getSummary(),
     });
+  }
+
+  async handleReady({ projectPath = null } = {}) {
+    const expectedProjectPath = normalizeInput(projectPath) || null;
+    let gateError = null;
+    if (this._sessionManager && typeof this._sessionManager.ensureReady === "function") {
+      try {
+        await this._sessionManager.ensureReady(expectedProjectPath);
+      } catch (err) {
+        gateError = safeString(err?.message ?? err).trim() || "ensureReady failed";
+      }
+    }
+
+    const mcp = this._buildReadinessSnapshot({ expectedProjectPath });
+    const ready = mcp.available ? Boolean(mcp.ready) : false;
+    return {
+      httpStatus: ready ? 200 : 503,
+      body: {
+        ok: ready,
+        status: ready ? "ready" : "not_ready",
+        ready,
+        mcp,
+        ...(gateError ? { error: gateError } : {}),
+      },
+    };
   }
 
   toErrorResponse(error) {
@@ -150,6 +216,132 @@ export class GenericMcpHttpAdapter {
     return { httpStatus: 200, body };
   }
 
+  _resolveResponseMode(payload) {
+    const mode = normalizeInput(payload?.responseMode).toLowerCase();
+    return mode === "full" ? "full" : "compact";
+  }
+
+  _buildRunResponseBody({ sessionId, runResult, responseMode = "compact" } = {}) {
+    const id = normalizeInput(sessionId) || null;
+    const result = isPlainObject(runResult) ? runResult : {};
+    if (responseMode === "full") {
+      return {
+        sessionId: id,
+        ...result,
+      };
+    }
+    const out = {
+      sessionId: id,
+      ok: Boolean(result.ok),
+      status: normalizeInput(result.status) || null,
+      reason: result.reason ?? null,
+      presentation: safeString(result.presentation),
+      responseMode: "compact",
+    };
+    const passthroughKeys = [
+      "kind",
+      "field",
+      "question",
+      "missing",
+      "options",
+      "attemptedValue",
+      "pauseReason",
+      "pausedTaskStatus",
+      "code",
+      "error",
+    ];
+    for (const key of passthroughKeys) {
+      if (!Object.prototype.hasOwnProperty.call(result, key)) continue;
+      out[key] = result[key];
+    }
+    if (isPlainObject(result.partialPlan)) {
+      out.partialPlan = {
+        tool: normalizeInput(result.partialPlan.tool) || null,
+        args: isPlainObject(result.partialPlan.args) ? result.partialPlan.args : {},
+      };
+    }
+    if (isPlainObject(result.taskQueue)) {
+      out.taskQueue = this._compactTaskQueue(result.taskQueue);
+    }
+    if (isPlainObject(result.pausedTaskResult)) {
+      out.pausedTask = this._compactRunResultSummary(result.pausedTaskResult);
+    }
+    const connectedProjectPath = normalizeInput(result?.session?.connectedProjectPath) || null;
+    const toolCount = Number.isFinite(Number(result?.inventory?.toolCount))
+      ? Number(result.inventory.toolCount)
+      : null;
+    if (connectedProjectPath || toolCount != null) {
+      out.context = {
+        ...(connectedProjectPath ? { connectedProjectPath } : {}),
+        ...(toolCount != null ? { toolCount } : {}),
+      };
+    }
+    out.resumeAvailable = out.status === "needs_input" || out.status === "paused";
+    return out;
+  }
+
+  _compactTaskQueue(taskQueue = {}) {
+    const queue = isPlainObject(taskQueue) ? taskQueue : {};
+    const tasks = asStringArray(queue.tasks);
+    const completedTasksRaw = Array.isArray(queue.completedTasks) ? queue.completedTasks : [];
+    const completedTasks = completedTasksRaw.map((entry) => this._compactQueueTaskEntry(entry));
+    const currentTaskIndex = Number.isFinite(Number(queue.currentTaskIndex))
+      ? Math.max(0, Math.floor(Number(queue.currentTaskIndex)))
+      : 0;
+    const pausedTask = isPlainObject(queue.pausedTask)
+      ? this._compactQueueTaskEntry(queue.pausedTask)
+      : null;
+    const totalTasks = Number.isFinite(Number(queue.totalTasks))
+      ? Math.max(0, Math.floor(Number(queue.totalTasks)))
+      : tasks.length;
+    return {
+      mode: normalizeInput(queue.mode) || null,
+      status: normalizeInput(queue.status) || null,
+      totalTasks,
+      currentTaskIndex,
+      pauseReason: normalizeInput(queue.pauseReason) || null,
+      tasks,
+      completedTasks,
+      pausedTask,
+      counts: {
+        completed: completedTasks.length,
+        pending: Math.max(totalTasks - currentTaskIndex, 0),
+        remaining: Math.max(totalTasks - (currentTaskIndex + 1), 0),
+      },
+    };
+  }
+
+  _compactQueueTaskEntry(entry = {}) {
+    const item = isPlainObject(entry) ? entry : {};
+    const out = {
+      index: Number.isFinite(Number(item.index)) ? Math.floor(Number(item.index)) : null,
+      task: normalizeInput(item.task) || null,
+      ok: typeof item.ok === "boolean" ? item.ok : null,
+      status: normalizeInput(item.status) || null,
+      reason: item.reason ?? null,
+      presentation: safeString(item.presentation),
+    };
+    const nested = isPlainObject(item.result) ? this._compactRunResultSummary(item.result) : null;
+    if (nested) out.result = nested;
+    return out;
+  }
+
+  _compactRunResultSummary(result = {}) {
+    const value = isPlainObject(result) ? result : null;
+    if (!value) return null;
+    return {
+      ok: Boolean(value.ok),
+      status: normalizeInput(value.status) || null,
+      reason: value.reason ?? null,
+      presentation: safeString(value.presentation),
+      kind: normalizeInput(value.kind) || null,
+      field: normalizeInput(value.field) || null,
+      question: normalizeInput(value.question) || null,
+      missing: asStringArray(value.missing),
+      options: asStringArray(value.options),
+    };
+  }
+
   _validateObjectPayload(payload) {
     if (payload == null) return {};
     if (!isPlainObject(payload)) {
@@ -173,18 +365,69 @@ export class GenericMcpHttpAdapter {
     return value;
   }
 
-  _resolveProjectPath(projectPathValue) {
-    const resolved = normalizeInput(projectPathValue) || this._defaultProjectPath;
-    if (!resolved) {
-      throw new GenericMcpHttpAdapterError(
-        'Field "projectPath" is required (or configure default project path).',
-        {
-          httpStatus: 400,
-          code: "missing_project_path",
-        }
-      );
+  _resolveProjectPath(projectPathValue, { sessionProjectPath = null } = {}) {
+    const requested = normalizeInput(projectPathValue) || null;
+    const sessionPath = normalizeInput(sessionProjectPath) || null;
+    const connectedPath = normalizeInput(this._readSessionManagerStatus()?.connectedProjectPath) || null;
+    return requested || sessionPath || connectedPath || this._defaultProjectPath || null;
+  }
+
+  _resolveResultProjectPath(runResult, { fallbackProjectPath = null } = {}) {
+    const fromResult = normalizeInput(runResult?.session?.connectedProjectPath) || null;
+    const connectedPath = normalizeInput(this._readSessionManagerStatus()?.connectedProjectPath) || null;
+    const fallback = normalizeInput(fallbackProjectPath) || null;
+    return fromResult || connectedPath || fallback;
+  }
+
+  _readSessionManagerStatus() {
+    if (!this._sessionManager || typeof this._sessionManager.getStatus !== "function") {
+      return null;
     }
-    return resolved;
+    try {
+      const status = this._sessionManager.getStatus();
+      return isPlainObject(status) ? status : null;
+    } catch {
+      return null;
+    }
+  }
+
+  _buildReadinessSnapshot({ expectedProjectPath = null } = {}) {
+    const status = this._readSessionManagerStatus();
+    if (!status) {
+      return {
+        available: false,
+        ready: null,
+        mcpClientReady: null,
+        bridgeReady: null,
+        connectedProjectPath: null,
+        desiredProjectRoot: null,
+        expectedProjectPath: normalizeInput(expectedProjectPath) || null,
+        projectMatches: null,
+        failurePhase: null,
+        failedPhase: null,
+        lastError: null,
+      };
+    }
+
+    const connectedProjectPath = normalizeInput(status.connectedProjectPath) || null;
+    const desiredProjectRoot = normalizeInput(status.desiredProjectRoot) || null;
+    const expected = normalizeInput(expectedProjectPath) || desiredProjectRoot || null;
+    const projectMatches = expected == null ? true : connectedProjectPath != null && connectedProjectPath === expected;
+    const ready = Boolean(status.mcpClientReady) && Boolean(status.bridgeReady) && Boolean(projectMatches);
+
+    return {
+      available: true,
+      ready,
+      mcpClientReady: Boolean(status.mcpClientReady),
+      bridgeReady: Boolean(status.bridgeReady),
+      connectedProjectPath,
+      desiredProjectRoot,
+      expectedProjectPath: expected,
+      projectMatches,
+      failurePhase: status.failurePhase ?? null,
+      failedPhase: status.failedPhase ?? null,
+      lastError: normalizeInput(status.lastError) || null,
+    };
   }
 }
 

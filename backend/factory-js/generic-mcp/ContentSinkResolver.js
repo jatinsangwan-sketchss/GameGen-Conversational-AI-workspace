@@ -12,6 +12,21 @@ function hasText(value) {
   return safeString(value).trim().length > 0;
 }
 
+function looksLikeCodePayload(value) {
+  const text = safeString(value);
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (trimmed.includes("```")) return true;
+  if (/[{};]/.test(trimmed) && /[=()]/.test(trimmed)) return true;
+  if (/\n/.test(trimmed) && /(^|\n)\s*(extends|class_name|func|var|const|if|for|while|return|pass)\b/i.test(trimmed)) {
+    return true;
+  }
+  if (/\n/.test(trimmed) && /(^|\n)\s*(def|class|function|import|from)\b/i.test(trimmed)) {
+    return true;
+  }
+  return false;
+}
+
 function getRequired(schema) {
   return Array.isArray(schema?.required)
     ? schema.required.map((x) => safeString(x).trim()).filter(Boolean)
@@ -59,6 +74,17 @@ function getGeneratedContentValue({ args = null, workflowState = null } = {}) {
   ];
   for (const c of candidates) {
     if (hasText(c)) return safeString(c);
+  }
+  const intentCandidates = [
+    a.codeIntent,
+    a.contentIntent,
+    ss.codeIntent,
+    ss.contentIntent,
+    workflowState?.semanticIntent?.codeIntent,
+    workflowState?.semanticIntent?.contentIntent,
+  ];
+  for (const c of intentCandidates) {
+    if (looksLikeCodePayload(c)) return safeString(c);
   }
   return null;
 }

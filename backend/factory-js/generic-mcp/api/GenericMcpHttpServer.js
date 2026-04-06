@@ -119,6 +119,12 @@ export class GenericMcpHttpServer {
       this._sendJson(res, response.httpStatus, response.body);
       return;
     }
+    if (method === "GET" && pathname === "/ready") {
+      const projectPath = safeString(url.searchParams.get("projectPath")).trim() || null;
+      const response = await this._adapter.handleReady({ projectPath });
+      this._sendJson(res, response.httpStatus, response.body);
+      return;
+    }
 
     if (method === "POST" && (pathname === "/run" || pathname === "/resume")) {
       const contentType = req.headers["content-type"] || "";

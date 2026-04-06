@@ -142,6 +142,7 @@ export class GenericMcpRunner {
     mcpConfig = null,
     pageSize = 100,
     maxSteps = 6,
+    maxQueuedTasks = 12,
     allowContentFallback = true,
     debug = false,
   } = {}) {
@@ -159,6 +160,9 @@ export class GenericMcpRunner {
     this._mcpConfig = mcpConfig ?? null;
     this._pageSize = pageSize;
     this._maxSteps = Number.isFinite(Number(maxSteps)) ? Math.max(1, Math.min(20, Number(maxSteps))) : 6;
+    this._maxQueuedTasks = Number.isFinite(Number(maxQueuedTasks))
+      ? Math.max(1, Math.min(50, Math.floor(Number(maxQueuedTasks))))
+      : 12;
     this._allowContentFallback = Boolean(allowContentFallback);
     this._debug = Boolean(debug);
 
@@ -187,6 +191,48 @@ export class GenericMcpRunner {
       });
     }
 
+    const resumedQueue = this._extractQueuedResumeState(resumeNeedsInput);
+    const initialQueue = resumedQueue ?? this._buildTaskQueueFromRequest(request);
+    if (!initialQueue?.ok) {
+      return this._buildRunResult({
+        ok: false,
+        status: "unsupported",
+        reason: safeString(initialQueue?.error).trim() || "Unable to build task queue.",
+        presentation: safeString(initialQueue?.error).trim() || "Unsupported request.",
+      });
+    }
+
+    if (!initialQueue.isQueueExecution) {
+      return this._runSingleTask({
+        userRequest: request,
+        projectRoot,
+        mcpConfig,
+        sessionContext,
+        resumeNeedsInput,
+      });
+    }
+
+    return this._runTaskQueue({
+      userRequest: request,
+      projectRoot,
+      mcpConfig,
+      sessionContext,
+      queueState: initialQueue.queueState,
+      queueResumeState: resumedQueue,
+    });
+  }
+
+  async _runSingleTask({ userRequest, projectRoot = null, mcpConfig = null, sessionContext = null, resumeNeedsInput = null } = {}) {
+    const request = safeString(userRequest).trim();
+    if (!request) {
+      return this._buildRunResult({
+        ok: false,
+        status: "needs_input",
+        reason: "userRequest is required.",
+        presentation: "Unsupported request: userRequest is required.",
+      });
+    }
+
     await this._ensureModules({ mcpConfig: mcpConfig ?? this._mcpConfig, projectRoot });
     const { sessionManager, toolInventory, toolPlanner, argumentResolver, executor, resultPresenter } = this._modules;
 
@@ -205,7 +251,7 @@ export class GenericMcpRunner {
     }
 
     const inventoryLoad = await toolInventory.load();
-    const inventory = toolInventory.getInventory();
+    let inventory = toolInventory.getInventory();
     if (!inventoryLoad?.ok) {
       const text = `Inventory load failed: ${safeString(inventoryLoad?.error || "unknown error")}`;
       return this._buildRunResult({
@@ -539,6 +585,31 @@ export class GenericMcpRunner {
           }),
         });
       }
+      const liveInventoryValidation = await this._refreshAndValidateExecutionTools({
+        toolInventory,
+        resolvedPlan: gatedReadyPlan,
+      });
+      inventory = liveInventoryValidation.inventory ?? inventory;
+      if (!liveInventoryValidation.ok) {
+        return this._buildRunResult({
+          ok: false,
+          status: "failed",
+          reason: liveInventoryValidation.error,
+          sessionStatus,
+          inventorySummary: { toolCount: inventory.toolCount, fetchedAt: inventory.fetchedAt },
+          planningResult: planning,
+          resolvedPlan: gatedReadyPlan,
+          executionResult: { ok: false, results: allStepResults, error: "live_inventory_validation_failed" },
+          presentation: liveInventoryValidation.error,
+          workflowState,
+          runtimeState: this._runtimeWithWorkflow({
+            planningResult: semSeededPlanForResolver,
+            resolvedPlan: gatedReadyPlan,
+            inventory,
+            workflowState,
+          }),
+        });
+      }
 
       const artifactsBefore = Array.isArray(this._modules.artifactRegistry?.getAll?.())
         ? this._modules.artifactRegistry.getAll().length
@@ -648,6 +719,339 @@ export class GenericMcpRunner {
         workflowState,
       }),
     });
+  }
+
+  _extractQueuedResumeState(resumeNeedsInput) {
+    const previous = isPlainObject(resumeNeedsInput) ? resumeNeedsInput : null;
+    if (!previous) return null;
+    if (safeString(previous.status).trim() !== "paused") return null;
+    const q = isPlainObject(previous.taskQueue) ? previous.taskQueue : null;
+    if (!q) return null;
+    const tasks = Array.isArray(q.tasks)
+      ? q.tasks.map((t) => safeString(t).trim()).filter(Boolean)
+      : [];
+    if (tasks.length < 1) return null;
+    const currentTaskIndex = Number.isFinite(Number(q.currentTaskIndex))
+      ? Math.max(0, Math.min(tasks.length - 1, Math.floor(Number(q.currentTaskIndex))))
+      : 0;
+    const completedTasks = Array.isArray(q.completedTasks)
+      ? q.completedTasks.filter((entry) => isPlainObject(entry))
+      : [];
+    const pausedTask = isPlainObject(q.pausedTask) ? q.pausedTask : null;
+    const pauseReason = safeString(q.pauseReason).trim().toLowerCase() === "needs_input" ? "needs_input" : "failed";
+    return {
+      ok: true,
+      isQueueExecution: true,
+      queueState: {
+        originalRequest: safeString(q.originalRequest).trim() || safeString(previous.reason).trim() || null,
+        tasks,
+        currentTaskIndex,
+        completedTasks,
+        pausedTask,
+        pauseReason,
+      },
+    };
+  }
+
+  _buildTaskQueueFromRequest(request) {
+    const tasks = this._splitUserRequestIntoTasks(request);
+    if (tasks.length < 1) {
+      return { ok: false, error: "No executable task found in user request.", isQueueExecution: false, queueState: null };
+    }
+    if (tasks.length > this._maxQueuedTasks) {
+      return {
+        ok: false,
+        error: `Task queue exceeds limit (${tasks.length} > ${this._maxQueuedTasks}).`,
+        isQueueExecution: false,
+        queueState: null,
+      };
+    }
+    return {
+      ok: true,
+      isQueueExecution: tasks.length > 1,
+      queueState: {
+        originalRequest: safeString(request).trim() || null,
+        tasks,
+        currentTaskIndex: 0,
+        completedTasks: [],
+        pausedTask: null,
+        pauseReason: null,
+      },
+    };
+  }
+
+  _splitUserRequestIntoTasks(request) {
+    const text = safeString(request).trim();
+    if (!text) return [];
+    const normalizeTask = (segment) =>
+      safeString(segment)
+        .trim()
+        .replace(/^[-*•]\s+/, "")
+        .replace(/^\d+\s*[\)\.\-:]\s+/, "")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const lineTasks = text
+      .split(/\r?\n+/)
+      .map(normalizeTask)
+      .filter(Boolean);
+    if (lineTasks.length > 1) return lineTasks;
+
+    const semicolonTasks = text
+      .split(/\s*;\s+/)
+      .map(normalizeTask)
+      .filter(Boolean);
+    if (semicolonTasks.length > 1) return semicolonTasks;
+
+    const connectorTasks = text
+      .split(/\s*(?:,\s*then\s+|,\s*next\s+|\band then\b\s+|\bthen\b\s+)/i)
+      .map(normalizeTask)
+      .filter(Boolean);
+    if (connectorTasks.length > 1) return connectorTasks;
+
+    return [text];
+  }
+
+  _interpretFailedTaskResumeInput(input) {
+    const text = safeString(input).trim();
+    const normalized = text.toLowerCase();
+    if (!text || ["retry", "resume", "continue", "again"].includes(normalized)) {
+      return { type: "retry_original" };
+    }
+    if (["skip", "next", "skip task", "skip this task"].includes(normalized)) {
+      return { type: "skip" };
+    }
+    return { type: "replace_task", task: text };
+  }
+
+  _toCompletedQueueTaskEntry({ index, task, result }) {
+    const r = isPlainObject(result) ? result : {};
+    return {
+      index,
+      task: safeString(task).trim() || null,
+      ok: Boolean(r.ok),
+      status: safeString(r.status).trim() || (r.ok ? "completed" : "failed"),
+      reason: r.reason ?? null,
+      presentation: safeString(r.presentation).trim() || "",
+      result: r,
+    };
+  }
+
+  _queueSummaryPresentation(completedTasks = []) {
+    const completed = Array.isArray(completedTasks) ? completedTasks : [];
+    const lines = [`Completed ${completed.length} queued task(s) sequentially.`];
+    for (const entry of completed) {
+      const i = Number.isFinite(Number(entry?.index)) ? Number(entry.index) + 1 : null;
+      const task = safeString(entry?.task).trim() || "(task)";
+      const status = safeString(entry?.status).trim() || (entry?.ok ? "completed" : "failed");
+      lines.push(`${i != null ? `${i}. ` : ""}${task} -> ${status}`);
+    }
+    return lines.join("\n");
+  }
+
+  _latestArtifactByKind(kind) {
+    const registry = this._modules?.artifactRegistry;
+    if (!registry || typeof registry.getAll !== "function") return null;
+    const all = Array.isArray(registry.getAll()) ? registry.getAll() : [];
+    const targetKind = safeString(kind).trim().toLowerCase();
+    for (let i = all.length - 1; i >= 0; i -= 1) {
+      const item = all[i];
+      if (!isPlainObject(item)) continue;
+      if (safeString(item.kind).trim().toLowerCase() !== targetKind) continue;
+      return item;
+    }
+    return null;
+  }
+
+  _applyQueueCarryoverArtifacts(taskText) {
+    let next = safeString(taskText).trim();
+    if (!next) return next;
+    const hasExplicitScript = /\.(?:gd)\b/i.test(next);
+    const hasExplicitScene = /\.(?:tscn)\b/i.test(next);
+    const hasScriptPronoun = /\b(?:this|that|the)\s+script\b/i.test(next);
+    const hasScenePronoun = /\b(?:this|that|the)\s+scene\b/i.test(next);
+
+    if (hasScriptPronoun && !hasExplicitScript) {
+      const scriptArtifact = this._latestArtifactByKind("script");
+      const scriptRef =
+        safeString(scriptArtifact?.godotPath).trim() ||
+        safeString(scriptArtifact?.relativePath).trim() ||
+        safeString(scriptArtifact?.filename).trim() ||
+        null;
+      if (scriptRef) {
+        next = next.replace(/\b(?:this|that|the)\s+script\b/i, `script ${scriptRef}`);
+      }
+    }
+    if (hasScenePronoun && !hasExplicitScene) {
+      const sceneArtifact = this._latestArtifactByKind("scene");
+      const sceneRef =
+        safeString(sceneArtifact?.godotPath).trim() ||
+        safeString(sceneArtifact?.relativePath).trim() ||
+        safeString(sceneArtifact?.filename).trim() ||
+        null;
+      if (sceneRef) {
+        next = next.replace(/\b(?:this|that|the)\s+scene\b/i, `scene ${sceneRef}`);
+      }
+    }
+    return next;
+  }
+
+  async _runTaskQueue({
+    userRequest,
+    projectRoot = null,
+    mcpConfig = null,
+    sessionContext = null,
+    queueState = null,
+    queueResumeState = null,
+  } = {}) {
+    const q = isPlainObject(queueState) ? queueState : {};
+    const tasks = Array.isArray(q.tasks) ? q.tasks.map((t) => safeString(t).trim()).filter(Boolean) : [];
+    if (tasks.length < 1) {
+      return this._buildRunResult({
+        ok: false,
+        status: "unsupported",
+        reason: "No queued tasks available for execution.",
+        presentation: "Unsupported request: no queued tasks found.",
+      });
+    }
+    let completedTasks = Array.isArray(q.completedTasks) ? [...q.completedTasks] : [];
+    let currentTaskIndex = Number.isFinite(Number(q.currentTaskIndex))
+      ? Math.max(0, Math.min(tasks.length - 1, Math.floor(Number(q.currentTaskIndex))))
+      : 0;
+    let pausedTask = isPlainObject(q.pausedTask) ? q.pausedTask : null;
+    let pauseReason = safeString(q.pauseReason).trim().toLowerCase() === "needs_input" ? "needs_input" : "failed";
+    const isResume = Boolean(queueResumeState?.isQueueExecution);
+
+    for (let taskIndex = currentTaskIndex; taskIndex < tasks.length; taskIndex += 1) {
+      const originalTaskText = tasks[taskIndex];
+      let singleTaskRequest = originalTaskText;
+      let singleTaskResumeState = null;
+
+      if (isResume && taskIndex === currentTaskIndex && pausedTask) {
+        if (pauseReason === "needs_input") {
+          singleTaskRequest = safeString(userRequest).trim();
+          singleTaskResumeState = pausedTask.result ?? null;
+        } else {
+          const action = this._interpretFailedTaskResumeInput(userRequest);
+          if (action.type === "skip") {
+            completedTasks.push({
+              index: taskIndex,
+              task: originalTaskText,
+              ok: true,
+              status: "skipped",
+              reason: "Skipped by user request.",
+              presentation: "Skipped.",
+              result: null,
+            });
+            pausedTask = null;
+            continue;
+          }
+          if (action.type === "replace_task") {
+            singleTaskRequest = safeString(action.task).trim() || originalTaskText;
+          }
+        }
+      }
+      if (!singleTaskResumeState) {
+        singleTaskRequest = this._applyQueueCarryoverArtifacts(singleTaskRequest);
+      }
+
+      const taskResult = await this._runSingleTask({
+        userRequest: singleTaskRequest,
+        projectRoot,
+        mcpConfig,
+        sessionContext,
+        resumeNeedsInput: singleTaskResumeState,
+      });
+      const status = safeString(taskResult?.status).trim();
+      if (taskResult?.ok && status === "completed") {
+        completedTasks.push(
+          this._toCompletedQueueTaskEntry({
+            index: taskIndex,
+            task: originalTaskText,
+            result: taskResult,
+          })
+        );
+        pausedTask = null;
+        pauseReason = null;
+        continue;
+      }
+
+      const queuePauseReason = status === "needs_input" ? "needs_input" : "failed";
+      const remainingTasks = tasks.slice(taskIndex + 1);
+      const queuePresentation =
+        queuePauseReason === "needs_input"
+          ? safeString(taskResult?.question).trim() ||
+            `Task ${taskIndex + 1} needs more input before queue execution can continue.`
+          : `Task ${taskIndex + 1} failed and queue execution is paused. Reply with \"retry\" to retry this task, \"skip\" to skip it, or provide replacement task text.`;
+
+      return {
+        ok: false,
+        status: "paused",
+        reason: queuePauseReason === "needs_input" ? "queue_paused_needs_input" : "queue_paused_failed",
+        session: taskResult?.session ?? null,
+        inventory: taskResult?.inventory ?? null,
+        planning: taskResult?.planning ?? null,
+        resolved: taskResult?.resolved ?? null,
+        execution: taskResult?.execution ?? null,
+        presentation: queuePresentation,
+        runtime: taskResult?.runtime ?? null,
+        workflow: taskResult?.workflow ?? null,
+        pauseReason: queuePauseReason,
+        question: queuePauseReason === "needs_input"
+          ? queuePresentation
+          : "What should I do with the paused task?",
+        options: queuePauseReason === "needs_input"
+          ? []
+          : ["retry", "skip", "replace_task_text"],
+        pausedTaskStatus: status || null,
+        pausedTaskResult: taskResult,
+        taskQueue: {
+          mode: "sequential",
+          status: "paused",
+          originalRequest: safeString(q.originalRequest).trim() || null,
+          totalTasks: tasks.length,
+          currentTaskIndex: taskIndex,
+          completedTasks,
+          tasks,
+          pendingTasks: tasks.slice(taskIndex),
+          remainingTasks,
+          pauseReason: queuePauseReason,
+          pausedTask: {
+            index: taskIndex,
+            task: originalTaskText,
+            result: taskResult,
+          },
+        },
+      };
+    }
+
+    const last = completedTasks.length > 0 ? completedTasks[completedTasks.length - 1]?.result : null;
+    return {
+      ok: true,
+      status: "completed",
+      reason: null,
+      session: last?.session ?? null,
+      inventory: last?.inventory ?? null,
+      planning: last?.planning ?? null,
+      resolved: last?.resolved ?? null,
+      execution: last?.execution ?? null,
+      runtime: last?.runtime ?? null,
+      workflow: last?.workflow ?? null,
+      presentation: this._queueSummaryPresentation(completedTasks),
+      taskQueue: {
+        mode: "sequential",
+        status: "completed",
+        originalRequest: safeString(q.originalRequest).trim() || null,
+        totalTasks: tasks.length,
+        currentTaskIndex: tasks.length,
+        completedTasks,
+        tasks,
+        pendingTasks: [],
+        remainingTasks: [],
+        pauseReason: null,
+        pausedTask: null,
+      },
+    };
   }
 
   async _ensureModules({ mcpConfig = null, projectRoot = null } = {}) {
@@ -838,7 +1242,12 @@ export class GenericMcpRunner {
     // For create-oriented flows, asking for an existing artifact ref is misleading.
     const opMode = safeString(workflowState?.artifactOperation?.mode).trim().toLowerCase();
     const isCreateMode = opMode.startsWith("create_");
-    if (isCreateMode && /ref$/i.test(safeString(field))) {
+    const knownRequestedName =
+      safeString(workflowState?.semanticState?.creationIntent?.requestedName).trim() ||
+      safeString(workflowState?.semanticIntent?.creationIntent?.requestedName).trim() ||
+      safeString(semanticArgs?.requestedName).trim() ||
+      "";
+    if (isCreateMode && /ref$/i.test(safeString(field)) && !knownRequestedName) {
       field = "requestedName";
       missing = ["requestedName"];
     }
@@ -1196,6 +1605,82 @@ export class GenericMcpRunner {
     const next = Number(workflowState.stepSignatures.get(signature) || 0) + 1;
     workflowState.stepSignatures.set(signature, next);
     return next >= 3;
+  }
+
+  async _refreshAndValidateExecutionTools({ toolInventory, resolvedPlan } = {}) {
+    const inventoryApi = toolInventory ?? this._modules.toolInventory;
+    if (!inventoryApi || typeof inventoryApi.refresh !== "function" || typeof inventoryApi.getInventory !== "function") {
+      return {
+        ok: false,
+        inventory: this._modules.toolInventory?.getInventory?.() ?? { toolCount: 0, tools: [], fetchedAt: null },
+        error: "Live inventory validation failed: tool inventory does not support refresh/getInventory.",
+      };
+    }
+    const refreshed = await inventoryApi.refresh();
+    const liveInventory = inventoryApi.getInventory();
+    if (!refreshed?.ok) {
+      return {
+        ok: false,
+        inventory: liveInventory,
+        error: `Live inventory refresh failed before execution: ${safeString(refreshed?.error || "unknown error")}`,
+      };
+    }
+
+    const plannedTools = Array.isArray(resolvedPlan?.tools) ? resolvedPlan.tools : [];
+    const liveNames = Array.isArray(liveInventory?.tools)
+      ? liveInventory.tools.map((tool) => safeString(tool?.name).trim()).filter(Boolean)
+      : [];
+    const liveNameSet = new Set(liveNames);
+    const missingNames = [];
+    const driftHints = [];
+    for (const stepTool of plannedTools) {
+      const name = safeString(stepTool?.name).trim();
+      if (!name) continue;
+      if (liveNameSet.has(name)) continue;
+      missingNames.push(name);
+      const aliasCandidates = this._findLikelyAliasCandidates(name, liveNames);
+      if (aliasCandidates.length > 0) {
+        driftHints.push(`${name} -> ${aliasCandidates.join(", ")}`);
+      }
+    }
+    if (missingNames.length > 0) {
+      const driftText = driftHints.length > 0
+        ? ` Potential alias drift: ${driftHints.join("; ")}.`
+        : "";
+      return {
+        ok: false,
+        inventory: liveInventory,
+        error: `Planned tool name(s) not found in current live inventory: ${missingNames.join(", ")}.${driftText} Re-plan against the current live tool inventory and retry.`,
+      };
+    }
+    return { ok: true, inventory: liveInventory, error: null };
+  }
+
+  _findLikelyAliasCandidates(plannedName, liveNames = []) {
+    const planned = safeString(plannedName).trim();
+    if (!planned) return [];
+    const plannedNormalized = this._normalizeToolNameIdentity(planned);
+    const plannedSignature = this._toolTokenSignature(planned);
+    const out = [];
+    for (const name of liveNames) {
+      const candidate = safeString(name).trim();
+      if (!candidate || candidate === planned) continue;
+      const sameIdentity = this._normalizeToolNameIdentity(candidate) === plannedNormalized;
+      const sameTokenSet = this._toolTokenSignature(candidate) === plannedSignature;
+      if (sameIdentity || sameTokenSet) out.push(candidate);
+      if (out.length >= 3) break;
+    }
+    return out;
+  }
+
+  _normalizeToolNameIdentity(value) {
+    return safeString(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+
+  _toolTokenSignature(value) {
+    const tokens = safeString(value).toLowerCase().match(/[a-z0-9]+/g) ?? [];
+    if (tokens.length < 1) return "";
+    return [...tokens].sort().join("|");
   }
 
   async _ensureGeneratedContentStage({ resolvedPlan, workflowState, sessionContext = null }) {

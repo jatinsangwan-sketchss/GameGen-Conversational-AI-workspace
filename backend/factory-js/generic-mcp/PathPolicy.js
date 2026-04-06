@@ -42,7 +42,6 @@ export function hasCreationIntent(args) {
     c.name
   );
   const targetFolder = firstNonEmpty(a.targetFolder, a.target_folder, a.folder, a.directory, c.targetFolder, c.folder);
-  const resourceKind = firstNonEmpty(a.resourceKind, a.resource_kind, a.kind, c.resourceKind, c.kind);
   const rootNodeType = firstNonEmpty(a.rootNodeType, a.root_node_type, c.rootNodeType, c.root_node_type);
   const hasCreateFlag =
     a.create === true ||
@@ -54,7 +53,9 @@ export function hasCreationIntent(args) {
   // Keep this generic: creation intent is inferred from semantic creation fields,
   // not from tool names. `name` alone is intentionally excluded to avoid treating
   // node/property names as create-path intent.
-  return Boolean(requestedName || targetFolder || resourceKind || rootNodeType || hasCreateFlag);
+  // Note: `resourceKind` alone is not enough to infer creation intent because many
+  // read/inspect flows include it while still targeting existing refs.
+  return Boolean(requestedName || targetFolder || rootNodeType || hasCreateFlag);
 }
 
 export function isPathLikeArg(argKey) {

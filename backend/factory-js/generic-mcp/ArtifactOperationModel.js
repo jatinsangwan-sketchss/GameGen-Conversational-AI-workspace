@@ -43,7 +43,9 @@ export function buildArtifactOperationState({ semanticIntent = null } = {}) {
     (hasCreateSignal(text) && goalType !== "modify") ||
     (hasText(intent?.creationIntent?.requestedName) && !existingTargetRef && goalType !== "modify");
   const wantsModify = hasModifySignal(text) || hasText(intent?.contentIntent) || hasText(intent?.codeIntent) || hasText(intent?.behaviorIntent);
-  const wantsAttach = hasAttachSignal(text) || hasText(intent?.refs?.targetNodeRef);
+  const wantsAttach =
+    hasAttachSignal(text) ||
+    (hasText(intent?.refs?.targetNodeRef) && hasText(existingTargetRef));
   const createMode = wantsCreate && !existingTargetRef;
   let mode = "general";
   if (createMode && wantsAttach && wantsModify) mode = "create_then_modify_then_attach";

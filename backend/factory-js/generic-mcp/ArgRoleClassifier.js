@@ -35,17 +35,37 @@ function isSessionInjectedKey(nk) {
   return (
     nk.includes("projectpath") ||
     nk.includes("projectroot") ||
+    nk.includes("projectref") ||
     nk.includes("project_root") ||
-    nk.includes("project_path")
+    nk.includes("project_path") ||
+    nk.includes("project_ref")
   );
 }
 
 function isNodeTargetKey(nk) {
   return (
     nk.includes("nodepath") ||
+    nk.includes("noderef") ||
     nk.includes("targetnode") ||
     nk.includes("parentpath")
   );
+}
+
+function isSemanticRefKey(nk) {
+  if (!nk) return false;
+  if (isSessionInjectedKey(nk)) return false;
+  if (isNodeTargetKey(nk)) return false;
+  if (
+    nk.includes("sceneref") ||
+    nk.includes("scriptref") ||
+    nk.includes("resourceref") ||
+    nk.includes("textureref") ||
+    nk.includes("fileref") ||
+    nk.includes("artifactref")
+  ) {
+    return true;
+  }
+  return nk.endsWith("ref");
 }
 
 function isPathLikeKey(nk) {
@@ -100,13 +120,22 @@ export function semanticSlotForArg(argName) {
   const nk = normalizeKey(raw);
   if (!nk) return raw;
   if (isSessionInjectedKey(nk)) return "projectPath";
+  if (nk.includes("sceneref")) return "sceneRef";
   if (nk.includes("scenepath")) return "sceneRef";
+  if (nk.includes("parentnoderef")) return "parentNodeRef";
   if (nk.includes("parentpath")) return "parentNodeRef";
+  if (nk.includes("targetnoderef")) return "targetNodeRef";
   if (nk.includes("targetnode")) return "targetNodeRef";
+  if (nk.includes("noderef")) return "nodeRef";
   if (nk.includes("nodepath")) return "nodeRef";
+  if (nk.includes("scriptref")) return "scriptRef";
   if (nk.includes("scriptpath")) return "scriptRef";
+  if (nk.includes("resourceref")) return "resourceRef";
   if (nk.includes("resourcepath")) return "resourceRef";
+  if (nk.includes("textureref")) return "textureRef";
   if (nk.includes("texturepath")) return "textureRef";
+  if (nk.includes("artifactref")) return "artifactRef";
+  if (nk.includes("fileref")) return "fileRef";
   if (nk.includes("filepath") || nk === "path") return "fileRef";
   if (nk.endsWith("path")) return `${raw.replace(/Path$/i, "").replace(/_path$/i, "")}Ref`;
   if (nk.includes("nodetype")) return "nodeType";
@@ -155,6 +184,9 @@ export function classifyArgRole({ argName, required = false, toolName = "", inpu
   }
   if (isSessionInjectedKey(nk)) {
     return { argName: raw, normalizedName: nk, required: true, role: "session_injected", semanticSlot: "projectPath" };
+  }
+  if (isSemanticRefKey(nk)) {
+    return { argName: raw, normalizedName: nk, required: true, role: "semantic_ref", semanticSlot: semanticSlotForArg(raw) };
   }
   if (isPathLikeKey(nk) || isNodeTargetKey(nk)) {
     const hints = toolHints(toolName, inputSchema);

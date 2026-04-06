@@ -31,9 +31,11 @@ Run the isolated sidecar server (no edits to base backend/frontend required):
 node ./factory-js/generic-mcp/run-generic-mcp-server.js \
   --client-module "./factory-js/generic-mcp/adapters/stdio-mcp-client.js"
 ```
+Startup auto-init is enabled by default: sidecar immediately begins MCP initialize + bridge readiness attempts on boot. Use `--no-auto-init` to disable.
 
 Routes:
 - `GET /health`
+- `GET /ready` (optional query: `?projectPath=/absolute/project/path`)
 - `POST /run`
 - `POST /resume`
 
@@ -43,8 +45,9 @@ Example payloads:
 ```json
 {
   "input": "create a gdscript called Logs and attach it to root node of NewScene.tscn. This script should print Hello world in the console",
-  "projectPath": "/absolute/project/path",
-  "sessionId": "optional"
+  "projectPath": "/absolute/project/path (optional)",
+  "sessionId": "optional",
+  "responseMode": "compact (default) | full (optional)"
 }
 ```
 
@@ -52,8 +55,12 @@ Example payloads:
 ```json
 {
   "sessionId": "required",
-  "input": "res://NewScene.tscn"
+  "input": "res://NewScene.tscn",
+  "responseMode": "compact (default) | full (optional)"
 }
 ```
 
 The sidecar stores `needs_input` continuation state in memory per `sessionId` and forwards it back into `GenericMcpRunner` on `/resume`.
+If `projectPath` is omitted, sidecar resolves it from the active MCP-connected project path (or from configured `--default-project-path` when available).
+
+`responseMode: "compact"` returns a concise payload focused on status, reason, question/pause metadata, and compact queue/task summaries (without large repeated `planning/resolved/execution/runtime/workflow` trees). Use `responseMode: "full"` when you need the complete runner payload for deep debugging.

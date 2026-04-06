@@ -58,7 +58,11 @@ function inferBehaviorIntent(text) {
 function inferTargetConcept(text) {
   const fromCodeFor = pickFirstRegex(text, /\b(?:write|add|implement|create)\s+(?:code|logic)\s+for\s+([A-Za-z0-9_-]{2,})\b/i);
   if (fromCodeFor) return fromCodeFor;
-  const fromAttach = pickFirstRegex(text, /\b(?:attach|assign|link)\b.*?\bto\s+(?:the\s+)?([A-Za-z0-9_-]{2,})\b/i);
+  const fromAttach =
+    pickFirstRegex(text, /\b(?:attach|assign|link)\b.*?\bto\s+(?:the\s+)?`([^`]+)`(?:\s+node)?\b/i) ??
+    pickFirstRegex(text, /\b(?:attach|assign|link)\b.*?\bto\s+(?:the\s+)?"([^"]+)"(?:\s+node)?\b/i) ??
+    pickFirstRegex(text, /\b(?:attach|assign|link)\b.*?\bto\s+(?:the\s+)?'([^']+)'(?:\s+node)?\b/i) ??
+    pickFirstRegex(text, /\b(?:attach|assign|link)\b.*?\bto\s+(?:the\s+)?([A-Za-z0-9_-]{2,})(?:\s+node)?\b/i);
   if (fromAttach) return fromAttach;
   return null;
 }
@@ -113,13 +117,21 @@ function extractSemanticRefs(text) {
   const bareScriptByCalled = createVerb ? null : pickFirstRegex(text, /\bscript\s+called\s+([A-Za-z0-9_.-]{2,})\b/i);
   const bareScriptByNamed = createVerb ? null : pickFirstRegex(text, /\bscript\s+named\s+([A-Za-z0-9_.-]{2,})\b/i);
   const bareScene = pickFirstRegex(text, /\bin\s+([A-Za-z0-9_-]{2,})(?:\s|,|\.|$)/i);
+  const nodeTarget =
+    pickFirstRegex(text, /\b(?:to|on|at)\s+(?:the\s+)?`([^`]+)`\s+node\b/i) ??
+    pickFirstRegex(text, /\b(?:to|on|at)\s+(?:the\s+)?"([^"]+)"\s+node\b/i) ??
+    pickFirstRegex(text, /\b(?:to|on|at)\s+(?:the\s+)?'([^']+)'\s+node\b/i) ??
+    pickFirstRegex(text, /\b(?:to|on|at)\s+(?:the\s+)?([A-Za-z0-9_-]{2,})\s+node\b/i);
   const rootNode = /\broot node\b/i.test(text) ? "root node" : null;
+  const blockedSceneTokens = new Set(["this", "that", "it", "script", "node", "scene"]);
+  const isUsableBareScene = bareScene && !blockedSceneTokens.has(safeString(bareScene).trim().toLowerCase());
   if (scenePath) refs.sceneRef = normalizeRefToken(scenePath);
-  else if (bareScene && !/\.(?:gd|tscn|tres|res)$/i.test(bareScene)) refs.sceneRef = bareScene;
+  else if (isUsableBareScene && !/\.(?:gd|tscn|tres|res)$/i.test(bareScene)) refs.sceneRef = bareScene;
   if (scriptPath) refs.scriptRef = normalizeRefToken(scriptPath);
   else if (bareScriptByCalled) refs.scriptRef = normalizeRefToken(bareScriptByCalled);
   else if (bareScriptByNamed) refs.scriptRef = normalizeRefToken(bareScriptByNamed);
-  if (rootNode) refs.targetNodeRef = rootNode;
+  if (nodeTarget) refs.targetNodeRef = safeString(nodeTarget).trim();
+  else if (rootNode) refs.targetNodeRef = rootNode;
   return refs;
 }
 
@@ -127,6 +139,12 @@ function extractCreationIntent(text) {
   const shouldCaptureName = hasCreateVerb(text);
   const requestedName = shouldCaptureName
     ? (
+      pickFirstRegex(text, /\bcalled\s+`([^`]+)`/i) ??
+      pickFirstRegex(text, /\bnamed\s+`([^`]+)`/i) ??
+      pickFirstRegex(text, /\bcalled\s+"([^"]+)"/i) ??
+      pickFirstRegex(text, /\bnamed\s+"([^"]+)"/i) ??
+      pickFirstRegex(text, /\bcalled\s+'([^']+)'/i) ??
+      pickFirstRegex(text, /\bnamed\s+'([^']+)'/i) ??
       pickFirstRegex(text, /\bcalled\s+([A-Za-z0-9_.-]+)/i) ??
       pickFirstRegex(text, /\bnamed\s+([A-Za-z0-9_.-]+)/i)
     )

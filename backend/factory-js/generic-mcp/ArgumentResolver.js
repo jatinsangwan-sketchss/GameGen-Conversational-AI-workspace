@@ -56,7 +56,33 @@ function toCanonicalGodotResourcePath(value) {
 
 function isLikelyMarkerToken(value) {
   const v = safeString(value).trim().toLowerCase();
-  return v === "called" || v === "named" || v === "node" || v === "script" || v === "scene";
+  return (
+    v === "called" ||
+    v === "named" ||
+    v === "node" ||
+    v === "script" ||
+    v === "scene" ||
+    v === "this" ||
+    v === "that" ||
+    v === "it" ||
+    v === "here" ||
+    v === "there"
+  );
+}
+
+function looksLikeCodePayload(value) {
+  const text = safeString(value);
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (trimmed.includes("```")) return true;
+  if (/[{};]/.test(trimmed) && /[=()]/.test(trimmed)) return true;
+  if (/\n/.test(trimmed) && /(^|\n)\s*(extends|class_name|func|var|const|if|for|while|return|pass)\b/i.test(trimmed)) {
+    return true;
+  }
+  if (/\n/.test(trimmed) && /(^|\n)\s*(def|class|function|import|from)\b/i.test(trimmed)) {
+    return true;
+  }
+  return false;
 }
 
 function normalizeBaseState(status) {
@@ -325,6 +351,7 @@ export class ArgumentResolver {
   classifyArgs({ toolName, args, inventory = null } = {}) {
     const toolSchema = this._getToolSchema(toolName, inventory);
     const roleInfo = classifyToolArgs({ toolName, inputSchema: toolSchema, args });
+    const inputArgs = isPlainObject(args) ? args : {};
     const classified = {
       session_context_args: [],
       file_resource_ref_args: [],
@@ -336,14 +363,21 @@ export class ArgumentResolver {
       const roleMeta = roleInfo.rolesByArg[key];
       const role = safeString(roleMeta?.role).trim();
       const nk = normalizeKey(key);
+      const hasProvidedValue = hasNonEmpty(inputArgs[key]);
+      const looksNodeTarget = this._isNodeTargetKey(nk) || isNodeRefSlot(roleMeta?.semanticSlot);
+      const looksFileRef = this._isFileResourceRefKey(nk) || this._isFileResourceSemanticSlot(roleMeta?.semanticSlot);
       if (role === "session_injected") {
         classified.session_context_args.push(key);
         continue;
       }
-      if (role === "semantic_ref" || role === "creation_intent_derived") {
-        if (this._isNodeTargetKey(nk) || isNodeRefSlot(roleMeta?.semanticSlot)) {
+      if (
+        role === "semantic_ref" ||
+        role === "creation_intent_derived" ||
+        (role === "optional" && hasProvidedValue && (looksNodeTarget || looksFileRef))
+      ) {
+        if (looksNodeTarget) {
           classified.node_target_args.push(key);
-        } else if (this._isFileResourceRefKey(nk)) {
+        } else if (looksFileRef) {
           classified.file_resource_ref_args.push(key);
         }
         continue;
@@ -465,10 +499,15 @@ export class ArgumentResolver {
       if (this._isProjectPathKey(normalizeKey(key))) continue;
       const raw = out[key];
       if (raw == null || safeString(raw).trim() === "") continue;
+      const roleMeta = isPlainObject(classification?.rolesByArg?.[key]) ? classification.rolesByArg[key] : null;
+      const isRequiredArg = Boolean(roleMeta?.required);
+      const enforceResolution = isRequiredArg || requiresExistingTarget;
       if (isLikelyMarkerToken(raw)) {
-        missingArgs.push(key);
+        if (enforceResolution) missingArgs.push(key);
+        else delete out[key];
         continue;
       }
+      const role = safeString(roleMeta?.role).trim().toLowerCase();
       // Policy layer: existing refs (must_exist) resolve via index; create/new path
       // targets (may_not_exist_yet) pass through without not_found checks.
       const policy = defaultPathPolicyForArg(key, out, {
@@ -477,6 +516,17 @@ export class ArgumentResolver {
       });
       const normalizedKey = normalizeKey(key);
       const isPathLikeRef = this._isFileResourceRefKey(normalizedKey);
+      if (isPathLikeRef && role === "creation_intent_derived") {
+        policy.existencePolicy = "may_not_exist_yet";
+        if (!safeString(policy.provenance).trim()) {
+          policy.provenance = "creation_intent_derived";
+        }
+      } else if (isPathLikeRef && role === "semantic_ref") {
+        policy.existencePolicy = "must_exist";
+        if (!safeString(policy.provenance).trim()) {
+          policy.provenance = "resolved_existing_ref";
+        }
+      }
       if (requiresExistingTarget && isPathLikeRef) {
         policy.existencePolicy = "must_exist";
         if (!safeString(policy.provenance).trim()) {
@@ -517,7 +567,8 @@ export class ArgumentResolver {
         }
         argMeta[key] = { provenance: "resolved_existing_ref", existencePolicy: "must_exist" };
       } else if (resolved.status === "ambiguous") {
-        ambiguities.push(...resolved.ambiguities);
+        if (enforceResolution) ambiguities.push(...resolved.ambiguities);
+        else delete out[key];
       } else if (resolved.status === "not_found") {
         const retried = await this._retryAfterIndexUpsert({ toolName, argKey: key, rawValue: raw });
         if (retried.status === "resolved") {
@@ -527,10 +578,12 @@ export class ArgumentResolver {
           }
           argMeta[key] = { provenance: "resolved_existing_ref", existencePolicy: "must_exist" };
         } else {
-          notFoundRefs.push(`${key} (not_found: ${safeString(raw).trim()})`);
+          if (enforceResolution) notFoundRefs.push(`${key} (not_found: ${safeString(raw).trim()})`);
+          else delete out[key];
         }
       } else if (resolved.status === "missing") {
-        missingArgs.push(key);
+        if (enforceResolution) missingArgs.push(key);
+        else delete out[key];
       }
     }
     for (const key of synthesizedKeys) {
@@ -571,6 +624,46 @@ export class ArgumentResolver {
     }
   }
 
+  _canInferNodeTargetForKey(argKey = "") {
+    const nk = normalizeKey(argKey);
+    return nk.includes("targetnode") || nk.includes("nodepath") || nk.includes("noderef");
+  }
+
+  _inferNodeTargetCandidate({ argKey = "", args = {}, workflowState = null } = {}) {
+    if (!this._canInferNodeTargetForKey(argKey)) return null;
+    const out = isPlainObject(args) ? args : {};
+    const semState = isPlainObject(workflowState?.semanticState) ? workflowState.semanticState : {};
+    const semIntent = isPlainObject(workflowState?.semanticIntent) ? workflowState.semanticIntent : {};
+    const semStateRefs = isPlainObject(semState?.targetRefs) ? semState.targetRefs : {};
+    const semIntentRefs = isPlainObject(semIntent?.refs) ? semIntent.refs : {};
+    const semStateCreation = isPlainObject(semState?.creationIntent) ? semState.creationIntent : {};
+    const semIntentCreation = isPlainObject(semIntent?.creationIntent) ? semIntent.creationIntent : {};
+    const candidates = [
+      out.targetNodeRef,
+      out.targetNode,
+      out.targetNodePath,
+      out.nodeRef,
+      out.nodePath,
+      semStateRefs.targetNodeRef,
+      semStateRefs.nodeRef,
+      semIntentRefs.targetNodeRef,
+      semIntentRefs.nodeRef,
+      semState.targetConcept,
+      semIntent.targetConcept,
+      out.nodeName,
+      out.targetNodeName,
+      out.requestedName,
+      semStateCreation.requestedName,
+      semIntentCreation.requestedName,
+    ];
+    for (const candidate of candidates) {
+      const value = safeString(candidate).trim();
+      if (!value || isLikelyMarkerToken(value)) continue;
+      return value;
+    }
+    return null;
+  }
+
   async resolveNodeRefs({ toolName, args, classification, workflowState = null } = {}) {
     const out = { ...(isPlainObject(args) ? args : {}) };
     const missingArgs = [];
@@ -588,9 +681,19 @@ export class ArgumentResolver {
     const scenePath = this._extractResolvedScenePath(out, workflowState);
     // console.log("scenePath [ArgumentResolver]", scenePath);
     for (const key of keys) {
-      const raw = out[key];
-      if (raw == null || safeString(raw).trim() === "") continue;
-      const rawText = safeString(raw).trim();
+      let rawText = safeString(out[key]).trim();
+      if (!rawText || isLikelyMarkerToken(rawText)) {
+        const inferred = this._inferNodeTargetCandidate({
+          argKey: key,
+          args: out,
+          workflowState,
+        });
+        if (!inferred) {
+          if (rawText) missingArgs.push(key);
+          continue;
+        }
+        rawText = inferred;
+      }
       if (isLikelyMarkerToken(rawText)) {
         missingArgs.push(key);
         continue;
@@ -602,7 +705,7 @@ export class ArgumentResolver {
       const resolved = await this._resolveNodeRef({
         toolName,
         argKey: key,
-        value: raw,
+        value: rawText,
         scenePath,
       });
       if (resolved.status === "resolved") {
@@ -610,7 +713,7 @@ export class ArgumentResolver {
       } else if (resolved.status === "ambiguous") {
         ambiguities.push(...resolved.ambiguities);
       } else if (resolved.status === "not_found") {
-        notFoundRefs.push(`${key} (not_found: ${safeString(raw).trim()})`);
+        notFoundRefs.push(`${key} (not_found: ${rawText})`);
       } else if (resolved.status === "missing") {
         missingArgs.push(key);
       }
@@ -666,7 +769,9 @@ export class ArgumentResolver {
   _isProjectPathKey(normalized) {
     return (
       normalized.includes("projectpath") ||
+      normalized.includes("projectref") ||
       normalized.includes("project_root") ||
+      normalized.includes("project_ref") ||
       normalized.includes("projectroot") ||
       normalized.includes("project_path")
     );
@@ -675,6 +780,12 @@ export class ArgumentResolver {
   _isFileResourceRefKey(normalized) {
     if (this._isSessionContextKey(normalized)) return false;
     return (
+      normalized.includes("sceneref") ||
+      normalized.includes("fileref") ||
+      normalized.includes("scriptref") ||
+      normalized.includes("resourceref") ||
+      normalized.includes("textureref") ||
+      normalized.includes("artifactref") ||
       normalized.includes("scenepath") ||
       normalized.includes("filepath") ||
       normalized.includes("scriptpath") ||
@@ -687,8 +798,24 @@ export class ArgumentResolver {
   _isNodeTargetKey(normalized) {
     return (
       normalized.includes("nodepath") ||
+      normalized.includes("noderef") ||
       normalized.includes("parentpath") ||
       normalized.includes("targetnode")
+    );
+  }
+
+  _isFileResourceSemanticSlot(slot = "") {
+    const normalized = normalizeKey(slot);
+    if (!normalized) return false;
+    if (this._isProjectPathKey(normalized)) return false;
+    if (this._isNodeTargetKey(normalized)) return false;
+    return (
+      normalized.includes("sceneref") ||
+      normalized.includes("fileref") ||
+      normalized.includes("scriptref") ||
+      normalized.includes("resourceref") ||
+      normalized.includes("textureref") ||
+      normalized.includes("artifactref")
     );
   }
 
@@ -1034,6 +1161,7 @@ export class ArgumentResolver {
       toolName,
       args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
       argMeta: inMeta,
+      inventory,
       workflowState,
     });
     console.log("[VERIFY][modify-target-resolution]", {
@@ -1072,6 +1200,7 @@ export class ArgumentResolver {
       };
     }
     const attachGate = this._ensureAttachExistingDualResolution({
+      toolName,
       args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
       argMeta: inMeta,
       workflowState,
@@ -1110,23 +1239,23 @@ export class ArgumentResolver {
     };
   }
 
-  _ensureAttachExistingDualResolution({ args = {}, argMeta = {}, workflowState = null } = {}) {
+  _ensureAttachExistingDualResolution({ toolName = "", args = {}, argMeta = {}, inventory = null, workflowState = null } = {}) {
     const mode = safeString(workflowState?.artifactOperation?.mode).trim().toLowerCase();
     const isAttach = mode === "attach_existing" || mode === "create_then_attach" || mode === "modify_then_attach";
     if (!isAttach) return { ok: true };
     const a = isPlainObject(args) ? args : {};
     const m = isPlainObject(argMeta) ? argMeta : {};
 
-    const artifactPath =
-      safeString(a.scriptPath).trim() ||
-      safeString(a.filePath).trim() ||
-      safeString(a.resourcePath).trim() ||
-      safeString(a.path).trim() ||
-      "";
-    const hasResolvedArtifact = this._looksConcreteArtifactPath(artifactPath);
+    const artifactPathCandidates = this._collectAttachArtifactPathCandidates({
+      toolName,
+      args: a,
+      argMeta: m,
+      inventory,
+    });
+    const hasResolvedArtifact = artifactPathCandidates.length > 0;
     if (!hasResolvedArtifact) {
       const field = this._preferredArtifactSemanticField(a);
-      const attempted = safeString(a[field]).trim() || safeString(a.artifactRef).trim() || null;
+      const attempted = this._extractAttachArtifactAttemptedValue(a);
       if (!attempted) {
         return { ok: false, status: "missing_args", field, reason: "Missing attach-side artifact target." };
       }
@@ -1143,7 +1272,8 @@ export class ArgumentResolver {
       safeString(a.targetNodePath).trim() ||
       safeString(a.nodePath).trim() ||
       safeString(a.nodeRef).trim() ||
-      safeString(a.targetNodeRef).trim();
+      safeString(a.targetNodeRef).trim() ||
+      safeString(this._inferNodeTargetCandidate({ argKey: "targetNodeRef", args: a, workflowState })).trim();
     if (!nodeCandidate || isLikelyMarkerToken(nodeCandidate)) {
       return { ok: false, status: "missing_args", field: "targetNodeRef", reason: "Missing attach-side node target." };
     }
@@ -1159,6 +1289,59 @@ export class ArgumentResolver {
     return { ok: true };
   }
 
+  _collectAttachArtifactPathCandidates({ toolName = "", args = {}, argMeta = {}, inventory = null } = {}) {
+    const out = [];
+    const a = isPlainObject(args) ? args : {};
+    const m = isPlainObject(argMeta) ? argMeta : {};
+    const schema = this._getToolSchema(toolName, inventory);
+    const roleInfo = classifyToolArgs({ toolName, inputSchema: schema, args: a });
+
+    for (const [key, rawValue] of Object.entries(a)) {
+      const value = safeString(rawValue).trim();
+      if (!value || !this._looksConcreteArtifactPath(value)) continue;
+      const nk = normalizeKey(key);
+      if (this._isProjectPathKey(nk)) continue;
+
+      const roleMeta = isPlainObject(roleInfo?.rolesByArg?.[key]) ? roleInfo.rolesByArg[key] : null;
+      const role = safeString(roleMeta?.role).trim().toLowerCase();
+      const semanticSlot = safeString(roleMeta?.semanticSlot).trim().toLowerCase();
+      const slotLooksNodeRef =
+        semanticSlot.includes("noderef") ||
+        semanticSlot.includes("targetnode") ||
+        semanticSlot.includes("parentnode");
+      if (this._isNodeTargetKey(nk) || slotLooksNodeRef) continue;
+
+      const looksPathLike = this._isFileResourceRefKey(nk);
+      const looksSemanticArtifactRef = semanticSlot.endsWith("ref") && semanticSlot !== "projectpath" && !slotLooksNodeRef;
+      const hasResolverPathPolicy = isPlainObject(m?.[key]);
+      const roleSuggestsResourcePath = role === "semantic_ref" || role === "creation_intent_derived";
+      if (!looksPathLike && !looksSemanticArtifactRef && !hasResolverPathPolicy && !roleSuggestsResourcePath) {
+        continue;
+      }
+
+      out.push({
+        key,
+        value,
+        role: role || null,
+        semanticSlot: semanticSlot || null,
+        existencePolicy: safeString(m?.[key]?.existencePolicy).trim().toLowerCase() || null,
+      });
+    }
+    return out;
+  }
+
+  _extractAttachArtifactAttemptedValue(args = {}) {
+    const a = isPlainObject(args) ? args : {};
+    for (const [key, rawValue] of Object.entries(a)) {
+      const value = safeString(rawValue).trim();
+      if (!value || isLikelyMarkerToken(value)) continue;
+      const nk = normalizeKey(key);
+      if (this._isProjectPathKey(nk) || this._isNodeTargetKey(nk)) continue;
+      if (nk.endsWith("ref") || this._isFileResourceRefKey(nk)) return value;
+    }
+    return null;
+  }
+
   _extractGeneratedContent({ args = {}, workflowState = null } = {}) {
     const direct = [
       safeString(args?.content).trim(),
@@ -1167,6 +1350,15 @@ export class ArgumentResolver {
       safeString(args?.text).trim(),
     ].find(Boolean);
     if (direct) return direct;
+    const intentCandidate = [
+      args?.codeIntent,
+      args?.contentIntent,
+      workflowState?.semanticState?.codeIntent,
+      workflowState?.semanticState?.contentIntent,
+      workflowState?.semanticIntent?.codeIntent,
+      workflowState?.semanticIntent?.contentIntent,
+    ].find((value) => looksLikeCodePayload(value));
+    if (intentCandidate) return safeString(intentCandidate).trim();
     return (
       safeString(workflowState?.semanticState?.generatedContent?.content).trim() ||
       safeString(workflowState?.semanticState?.generatedCode).trim() ||
@@ -1176,22 +1368,33 @@ export class ArgumentResolver {
 
   _buildCompileVariants({ toolName, args, inventory = null, generatedContent = "" } = {}) {
     const base = isPlainObject(args) ? { ...args } : {};
-    const variants = [base];
+    const variants = [];
     const content = safeString(generatedContent).trim();
-    if (!content) return variants;
-    const schema = this._getToolSchema(toolName, inventory);
-    const props = isPlainObject(schema?.properties) ? schema.properties : {};
-    const keys = Object.keys(props).filter((k) => this._looksLikeInlineContentField(k));
     const seen = new Set();
-    seen.add(JSON.stringify(base));
-    for (const key of keys.slice(0, 4)) {
-      const next = { ...base };
-      next[key] = next[key] ?? content;
-      const sig = JSON.stringify(next);
-      if (seen.has(sig)) continue;
+    const pushVariant = (candidate) => {
+      const sig = JSON.stringify(candidate);
+      if (seen.has(sig)) return;
       seen.add(sig);
-      variants.push(next);
+      variants.push(candidate);
+    };
+
+    if (content) {
+      const schema = this._getToolSchema(toolName, inventory);
+      const props = isPlainObject(schema?.properties) ? schema.properties : {};
+      const keys = Object.keys(props).filter((k) => this._looksLikeInlineContentField(k));
+      for (const key of keys.slice(0, 4)) {
+        const next = { ...base };
+        if (!hasNonEmpty(next[key])) next[key] = content;
+        pushVariant(next);
+      }
     }
+
+    if (variants.length < 1) {
+      pushVariant(base);
+      return variants;
+    }
+
+    pushVariant(base);
     return variants;
   }
 

@@ -37,11 +37,17 @@ Start the local HTTP sidecar:
 node ./factory-js/generic-mcp/run-generic-mcp-server.js \
   --client-module "./factory-js/generic-mcp/adapters/stdio-mcp-client.js"
 ```
+By default, sidecar starts MCP initialize + bridge readiness attempts immediately on boot (disable with `--no-auto-init`).
 
 Health check:
 
 ```bash
 curl -s http://127.0.0.1:4318/health
+```
+Readiness check (runs MCP/session readiness gate):
+
+```bash
+curl -s "http://127.0.0.1:4318/ready"
 ```
 
 Run a new request:
@@ -51,7 +57,7 @@ curl -s http://127.0.0.1:4318/run \
   -H "Content-Type: application/json" \
   -d '{
     "input":"create a gdscript called Logs and attach it to root node of NewScene.tscn. This script should print Hello world in the console",
-    "projectPath":"/absolute/project/path",
+    "projectPath":"/absolute/project/path (optional)",
     "sessionId":"optional"
   }'
 ```

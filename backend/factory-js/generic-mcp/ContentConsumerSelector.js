@@ -38,11 +38,51 @@ export function extractToolSchema(toolName, inventory) {
 const DIRECT_CONTENT_NAME_RE =
   /^(content|body|source|text|code|snippet|script|scriptbody|scriptBody|filecontent|fileContent|sourcecode|sourceCode|raw|data)$/i;
 
+const DIRECT_CONTENT_NORMALIZED_KEYS = new Set([
+  "content",
+  "body",
+  "source",
+  "text",
+  "code",
+  "snippet",
+  "script",
+  "scriptbody",
+  "scriptcontent",
+  "scriptcode",
+  "scriptsource",
+  "scripttext",
+  "filecontent",
+  "filebody",
+  "filecode",
+  "filesource",
+  "filetext",
+  "sourcecode",
+  "sourcecontent",
+  "raw",
+  "data",
+]);
+
+function normalizeContentKey(key) {
+  return safeString(key).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
 function propertyLooksLikeDirectContentString(key, propSchema) {
   const k = safeString(key).trim();
-  if (!DIRECT_CONTENT_NAME_RE.test(k)) return false;
   const t = safeString(propSchema?.type).trim().toLowerCase();
-  return !t || t === "string";
+  if (t && t !== "string") return false;
+
+  if (DIRECT_CONTENT_NAME_RE.test(k)) return true;
+  const normalized = normalizeContentKey(k);
+  if (!normalized) return false;
+  if (DIRECT_CONTENT_NORMALIZED_KEYS.has(normalized)) return true;
+
+  const suffixMatch = normalized.match(/(content|body|source|text|code|snippet)$/);
+  if (!suffixMatch) return false;
+  const suffix = safeString(suffixMatch[1]).trim();
+  const prefix = normalized.slice(0, normalized.length - suffix.length);
+  if (!prefix) return true;
+  if (/(intent|path|ref|kind|type|mode|format|language|lang)$/.test(prefix)) return false;
+  return /(script|file|source|raw|data|payload|template|content|code|text|body)/.test(prefix);
 }
 
 /**

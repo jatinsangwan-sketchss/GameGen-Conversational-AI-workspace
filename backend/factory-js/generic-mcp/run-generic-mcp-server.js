@@ -108,6 +108,7 @@ export async function createGenericMcpSidecarRuntime({ argv = [], env = process.
   const adapter = new GenericMcpHttpAdapter({
     runner,
     sessionStore,
+    sessionManager,
     mcpConfig,
     defaultProjectPath: config.defaultProjectPath,
     debug: config.debug,
@@ -121,6 +122,37 @@ export async function createGenericMcpSidecarRuntime({ argv = [], env = process.
   });
 
   let stopped = false;
+  let startupWarmupPromise = null;
+  async function warmupConnection({ projectRoot = null, source = "startup" } = {}) {
+    const desiredProjectRoot = safeString(projectRoot).trim() || config.defaultProjectPath || null;
+    const label = safeString(source).trim() || "startup";
+    const projectLabel = desiredProjectRoot ? ` project=${desiredProjectRoot}` : "";
+    console.error(`[generic-mcp] ${label} gate: initialize+bridge readiness${projectLabel}`);
+    try {
+      const readyRes = await sessionManager.ensureReady(desiredProjectRoot);
+      const st = sessionManager.getStatus();
+      if (readyRes?.ok) {
+        console.error(
+          `[generic-mcp] ${label} gate: ready (bridgeReady=${Boolean(st?.bridgeReady)} connectedProjectPath=${safeString(st?.connectedProjectPath).trim() || "null"})`
+        );
+        return { ok: true, status: st };
+      }
+      const err = safeString(readyRes?.status?.lastError ?? st?.lastError ?? "bridge not ready").trim() || "bridge not ready";
+      console.error(`[generic-mcp] ${label} gate: not ready (${err})`);
+      return { ok: false, status: st, error: err };
+    } catch (err) {
+      const text = safeString(err?.message ?? err).trim() || "bridge readiness failed";
+      console.error(`[generic-mcp] ${label} gate failed: ${text}`);
+      return { ok: false, status: sessionManager.getStatus(), error: text };
+    }
+  }
+  function startStartupWarmup() {
+    if (!config.autoInitializeOnStart || stopped || startupWarmupPromise) return startupWarmupPromise;
+    startupWarmupPromise = warmupConnection({ source: "startup" }).finally(() => {
+      startupWarmupPromise = null;
+    });
+    return startupWarmupPromise;
+  }
   return {
     config,
     mcpConfig,
@@ -131,7 +163,11 @@ export async function createGenericMcpSidecarRuntime({ argv = [], env = process.
     server,
     async start() {
       const address = await server.start();
+      startStartupWarmup();
       return address;
+    },
+    async warmupConnection(options = {}) {
+      return warmupConnection(options);
     },
     async stop() {
       if (stopped) return;
@@ -156,6 +192,9 @@ async function main() {
   );
   console.error(
     `[generic-mcp] workflow source of truth: GenericMcpRunner | client module: ${runtime.config.clientModulePath}`
+  );
+  console.error(
+    `[generic-mcp] startup auto-init gate: ${runtime.config.autoInitializeOnStart ? "enabled" : "disabled"}`
   );
 
   let shuttingDown = false;

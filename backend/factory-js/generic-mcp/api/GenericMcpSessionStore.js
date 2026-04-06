@@ -27,6 +27,14 @@ function normalizeProjectPath(projectPath) {
   return v || null;
 }
 
+function isResumableRunResult(runResult) {
+  const status = safeString(runResult?.status).trim();
+  if (status === "needs_input") return true;
+  if (status !== "paused") return false;
+  const queue = runResult?.taskQueue;
+  return isPlainObject(queue) && safeString(queue.status).trim() === "paused";
+}
+
 function makeRecord({ sessionId, projectPath = null }) {
   const now = new Date().toISOString();
   return {
@@ -79,8 +87,7 @@ export class GenericMcpSessionStore {
     if (!next) return null;
 
     next.lastRunResult = clone(runResult);
-    const status = safeString(runResult?.status).trim();
-    next.pendingNeedsInput = status === "needs_input" ? clone(runResult) : null;
+    next.pendingNeedsInput = isResumableRunResult(runResult) ? clone(runResult) : null;
     if (projectPath != null) {
       next.projectPath = normalizeProjectPath(projectPath);
     }
