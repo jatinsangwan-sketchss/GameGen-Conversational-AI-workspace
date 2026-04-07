@@ -32,26 +32,39 @@ function firstNonEmpty(...vals) {
   return null;
 }
 
+function inferResourceKindFromRequestedName(requestedName) {
+  const raw = safeString(requestedName).trim().toLowerCase();
+  if (!raw) return null;
+  const normalized = raw.replace(/\\/g, "/");
+  if (normalized.endsWith(".gd")) return "script";
+  if (normalized.endsWith(".tscn")) return "scene";
+  if (normalized.endsWith(".tres") || normalized.endsWith(".res")) return "resource";
+  return null;
+}
+
 /**
  * Structured creation intent from planner args (flat and/or nested `creationIntent`).
  */
 export function extractCreationIntent(args) {
   const a = isPlainObject(args) ? args : {};
   const c = isPlainObject(a.creationIntent) ? a.creationIntent : {};
+  const requestedName = firstNonEmpty(
+    a.requestedName,
+    a.requested_name,
+    a.name,
+    a.sceneName,
+    a.fileName,
+    a.resourceName,
+    c.requestedName,
+    c.requested_name,
+    c.name
+  );
+  const explicitKind =
+    firstNonEmpty(a.resourceKind, a.resource_kind, a.kind, c.resourceKind, c.kind)?.toLowerCase() ?? null;
   return {
-    requestedName: firstNonEmpty(
-      a.requestedName,
-      a.requested_name,
-      a.name,
-      a.sceneName,
-      a.fileName,
-      a.resourceName,
-      c.requestedName,
-      c.requested_name,
-      c.name
-    ),
+    requestedName,
     targetFolder: firstNonEmpty(a.targetFolder, a.target_folder, a.folder, a.directory, c.targetFolder, c.folder),
-    resourceKind: firstNonEmpty(a.resourceKind, a.resource_kind, a.kind, c.resourceKind, c.kind)?.toLowerCase() ?? null,
+    resourceKind: explicitKind || inferResourceKindFromRequestedName(requestedName),
     rootNodeType: firstNonEmpty(a.rootNodeType, a.root_node_type, c.rootNodeType) ?? null,
   };
 }

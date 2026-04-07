@@ -30,7 +30,17 @@ function hasModifySignal(text) {
 }
 
 function hasAttachSignal(text) {
-  return /\b(attach|assign|link|use)\b/i.test(text);
+  return /\b(attach|assign|link|bind)\b/i.test(text) || /\buse\b[\s\S]{0,80}\b(on|to)\b/i.test(text);
+}
+function looksLikeArtifactPath(ref) {
+  const value = safeString(ref).trim();
+  if (!value) return false;
+  return /[\\/]/.test(value) || /\.(gd|tscn|tres|res|png|jpg|jpeg|webp|gdshader|shader)$/i.test(value);
+}
+function hasCreateArtifactSignal(text) {
+  const t = safeString(text);
+  if (!t.trim()) return false;
+  return /\b(create|new|generate|scaffold)\b[\s\S]{0,48}\b(script|scene|file|resource|shader|texture|singleton|autoload)\b/i.test(t);
 }
 
 export function buildArtifactOperationState({ semanticIntent = null } = {}) {
@@ -38,6 +48,10 @@ export function buildArtifactOperationState({ semanticIntent = null } = {}) {
   const text = safeString(intent.goalText).trim();
   const goalType = safeString(intent?.goalType).trim().toLowerCase();
   const existingTargetRef = anyRef(intent);
+  const hasNamedCreationIntent = hasText(intent?.creationIntent?.requestedName);
+  const createArtifactSignal = hasCreateArtifactSignal(text);
+  const createArtifactIntent = createArtifactSignal || hasNamedCreationIntent;
+  const createTargetRefLikelyOutput = Boolean(existingTargetRef) && createArtifactIntent && looksLikeArtifactPath(existingTargetRef);
   const wantsCreate =
     goalType === "create" ||
     (hasCreateSignal(text) && goalType !== "modify") ||
@@ -46,7 +60,7 @@ export function buildArtifactOperationState({ semanticIntent = null } = {}) {
   const wantsAttach =
     hasAttachSignal(text) ||
     (hasText(intent?.refs?.targetNodeRef) && hasText(existingTargetRef));
-  const createMode = wantsCreate && !existingTargetRef;
+  const createMode = wantsCreate && (!existingTargetRef || createTargetRefLikelyOutput);
   let mode = "general";
   if (createMode && wantsAttach && wantsModify) mode = "create_then_modify_then_attach";
   else if (createMode && wantsAttach) mode = "create_then_attach";

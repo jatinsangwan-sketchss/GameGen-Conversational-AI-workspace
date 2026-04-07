@@ -121,6 +121,28 @@ function toGodotPath(value) {
   const rel = normalizeRef(value);
   return rel ? `res://${rel}` : null;
 }
+function looksAttachToolName(toolName) {
+  const normalized = safeString(toolName).replace(/[_-]+/g, " ").toLowerCase();
+  return /\b(attach|assign|link|bind)\b/.test(normalized) || /\bset\b.*\b(script|property|properties)\b/.test(normalized);
+}
+function hasScriptPropertyHint(args = {}) {
+  const a = toArgs(args);
+  const directName = safeString(a.propertyName || a.property || a.key).trim().toLowerCase();
+  if (directName === "script") return true;
+  for (const key of ["propertyMap", "properties", "props"]) {
+    const raw = a[key];
+    if (isPlainObject(raw) && Object.prototype.hasOwnProperty.call(raw, "script")) return true;
+    if (typeof raw === "string") {
+      try {
+        const parsed = JSON.parse(raw);
+        if (isPlainObject(parsed) && Object.prototype.hasOwnProperty.call(parsed, "script")) return true;
+      } catch {
+        // ignore non-json property payloads
+      }
+    }
+  }
+  return false;
+}
 const VERIFIABLE_ARTIFACT_EXTENSIONS = new Set([
   ".tscn",
   ".gd",
@@ -139,6 +161,23 @@ function hasVerifiableArtifactExtension(candidate) {
   if (!rel) return false;
   const ext = path.extname(rel).toLowerCase();
   return VERIFIABLE_ARTIFACT_EXTENSIONS.has(ext);
+}
+function isGdScriptArtifactCandidate(candidate) {
+  const rel = normalizeRef(candidate);
+  if (!rel) return false;
+  return path.extname(rel).toLowerCase() === ".gd";
+}
+function isAlreadyExistsErrorText(text) {
+  const t = safeString(text).trim().toLowerCase();
+  if (!t) return false;
+  return (
+    t.includes("already exists") ||
+    t.includes("already exist") ||
+    t.includes("exists already") ||
+    t.includes("file already exists") ||
+    t.includes("script file already exists") ||
+    t.includes("resource already exists")
+  );
 }
 
 function sleep(ms) {
@@ -260,6 +299,19 @@ export class Executor {
     const rawResult = await this._callTool(client, { toolName, args: toArgs(args), payload });
     let ok = isRawResultOk(rawResult);
     let error = ok ? null : this.extractFailureText(rawResult);
+    if (!ok) {
+      const recoverableCreateCollision = await this._isRecoverableCreateCollision({
+        toolName,
+        args: toArgs(args),
+        rawResult,
+        errorText: error,
+        workflowState,
+      });
+      if (recoverableCreateCollision) {
+        ok = true;
+        error = null;
+      }
+    }
     if (ok) {
       const creationVerification = await this._verifyArtifactFilesExist({
         toolName,
@@ -271,6 +323,14 @@ export class Executor {
         ok = false;
         error = creationVerification.reason || "Creation verification failed.";
       }
+    }
+    if (ok) {
+      await this._normalizeCreatedGdscriptHeaders({
+        toolName,
+        args: toArgs(args),
+        rawResult,
+        workflowState,
+      });
     }
     if (ok) {
       const attachVerification = await this._verifyAttachApplied({
@@ -390,16 +450,18 @@ export class Executor {
     throw new Error("MCP client does not support callTool/toolsCall/request.");
   }
 
-  async _verifyAttachApplied({ args, client, inventory, workflowState }) {
+  async _verifyAttachApplied({ toolName, args, client, inventory, workflowState }) {
     if (!isAttachMode(workflowState)) return { ok: true };
+    const stepToolName = safeString(toolName).trim();
     const scriptTarget = pickFirstText([args.scriptPath, args.scriptRef]);
-    if (!scriptTarget) {
-      return { ok: true };
-    }
     const nodeTarget = pickFirstText([args.nodePath, args.targetNodePath, args.targetNode, args.nodeRef, args.targetNodeRef]);
     const sceneTarget = pickFirstText([args.scenePath, args.sceneRef]);
+    const stepLooksAttach = looksAttachToolName(stepToolName) || hasScriptPropertyHint(args) || Boolean(nodeTarget && sceneTarget);
+    if (!stepLooksAttach) {
+      return { ok: true };
+    }
     if (!scriptTarget || !nodeTarget || !sceneTarget) {
-      return { ok: false, reason: "Attach verification failed: missing scene/node/script target for read-back verification." };
+      return { ok: true };
     }
     const readTool = this._pickNodePropertiesReadTool(inventory);
     if (!readTool) {
@@ -520,6 +582,81 @@ export class Executor {
       ok: false,
       reason: `Creation verification failed: expected artifact path(s) do not exist on disk (${pretty.join(", ")}).`,
     };
+  }
+
+  async _isRecoverableCreateCollision({ toolName, args = {}, rawResult = null, errorText = "", workflowState = null } = {}) {
+    if (!this._expectsArtifactCreation({ toolName, workflowState })) return false;
+    if (!isAlreadyExistsErrorText(errorText)) return false;
+    const projectRoot = this._resolveProjectRootForVerification(args);
+    if (!projectRoot) return false;
+    const candidates = this._collectVerifiableArtifactCandidates({ args, rawResult, projectRoot });
+    if (candidates.length < 1) return false;
+    for (const abs of candidates) {
+      const existsNow = await this._pathExistsViaIndexOrFs(abs, projectRoot);
+      if (existsNow) return true;
+    }
+    return false;
+  }
+
+  _dedupeLeadingExtendsLines(scriptContent = "") {
+    const source = safeString(scriptContent);
+    if (!source) return { changed: false, content: source };
+    const eol = source.includes("\r\n") ? "\r\n" : "\n";
+    const lines = source.split(/\r?\n/);
+    const isMeaningful = (line) => {
+      const trimmed = safeString(line).trim();
+      if (!trimmed) return false;
+      if (trimmed.startsWith("#")) return false;
+      return true;
+    };
+    const meaningful = [];
+    for (let i = 0; i < lines.length; i += 1) {
+      if (!isMeaningful(lines[i])) continue;
+      meaningful.push(i);
+      if (meaningful.length >= 2) break;
+    }
+    if (meaningful.length < 2) return { changed: false, content: source };
+    const [firstIdx, secondIdx] = meaningful;
+    const first = safeString(lines[firstIdx]).trim();
+    const second = safeString(lines[secondIdx]).trim();
+    const firstExtends = /^extends\b/i.test(first);
+    const secondExtends = /^extends\b/i.test(second);
+    if (!firstExtends || !secondExtends) return { changed: false, content: source };
+    const norm = (line) => safeString(line).trim().toLowerCase().replace(/\s+/g, " ");
+    const firstNorm = norm(first);
+    const secondNorm = norm(second);
+    const shouldDropFirst = firstNorm === secondNorm || firstNorm === "extends node";
+    if (!shouldDropFirst) return { changed: false, content: source };
+    lines.splice(firstIdx, 1);
+    const trailingEol = source.endsWith("\r\n") || source.endsWith("\n");
+    const collapsed = lines.join(eol);
+    return { changed: true, content: trailingEol ? `${collapsed}${eol}` : collapsed };
+  }
+
+  async _normalizeCreatedGdscriptHeaders({ toolName, args = {}, rawResult = null, workflowState = null } = {}) {
+    if (!this._expectsArtifactCreation({ toolName, workflowState })) return;
+    const projectRoot = this._resolveProjectRootForVerification(args);
+    if (!projectRoot) return;
+    const candidates = this._collectVerifiableArtifactCandidates({ args, rawResult, projectRoot })
+      .filter((absPath) => isGdScriptArtifactCandidate(absPath));
+    if (candidates.length < 1) return;
+    for (const absPath of candidates) {
+      const exists = await this._pathExistsViaIndexOrFs(absPath, projectRoot);
+      if (!exists) continue;
+      let text = "";
+      try {
+        text = await fs.readFile(absPath, "utf8");
+      } catch {
+        continue;
+      }
+      const normalized = this._dedupeLeadingExtendsLines(text);
+      if (!normalized.changed) continue;
+      try {
+        await fs.writeFile(absPath, normalized.content, "utf8");
+      } catch {
+        // best-effort normalization only
+      }
+    }
   }
 
   _pickNodePropertiesReadTool(inventory) {

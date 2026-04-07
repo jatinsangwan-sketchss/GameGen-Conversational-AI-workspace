@@ -33,6 +33,76 @@ function getRequired(schema) {
     : [];
 }
 
+function normalizeKey(value) {
+  return safeString(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function schemaAllowsStringContent(propSchema) {
+  const schema = isPlainObject(propSchema) ? propSchema : {};
+  const directType = schema.type;
+  if (typeof directType === "string") {
+    return directType.trim().toLowerCase() === "string";
+  }
+  if (Array.isArray(directType)) {
+    return directType.some((entry) => safeString(entry).trim().toLowerCase() === "string");
+  }
+  const unionKeys = ["anyOf", "oneOf", "allOf"];
+  for (const key of unionKeys) {
+    const variants = Array.isArray(schema[key]) ? schema[key] : [];
+    for (const variant of variants) {
+      if (!isPlainObject(variant)) continue;
+      if (schemaAllowsStringContent(variant)) return true;
+    }
+  }
+  return false;
+}
+
+function inferFallbackContentArgKeys(schema = {}) {
+  const props = isPlainObject(schema?.properties) ? schema.properties : {};
+  const out = [];
+  for (const [key, propSchema] of Object.entries(props)) {
+    if (!schemaAllowsStringContent(propSchema)) continue;
+    const nk = normalizeKey(key);
+    if (!nk) continue;
+    if (
+      nk.includes("path") ||
+      nk.endsWith("ref") ||
+      nk.includes("project") ||
+      nk.includes("folder") ||
+      nk.includes("directory") ||
+      nk.includes("scene") ||
+      nk.includes("node") ||
+      nk.includes("target") ||
+      nk.includes("resource") ||
+      nk.includes("artifact") ||
+      nk.includes("requestedname") ||
+      nk === "name" ||
+      nk.includes("reason") ||
+      nk.includes("status") ||
+      nk.includes("intent") ||
+      nk.includes("mode") ||
+      nk.includes("kind") ||
+      nk.includes("type")
+    ) {
+      continue;
+    }
+    if (
+      nk === "script" ||
+      nk.includes("content") ||
+      nk.includes("body") ||
+      nk.includes("source") ||
+      nk.includes("text") ||
+      nk.includes("code") ||
+      nk.includes("snippet") ||
+      nk.includes("template") ||
+      nk.includes("payload")
+    ) {
+      out.push(key);
+    }
+  }
+  return out;
+}
+
 function rankKey(key) {
   const k = safeString(key).trim().toLowerCase();
   const priority = [
@@ -57,24 +127,45 @@ function pickPreferredKey(keys = []) {
     .filter(Boolean)
     .sort((a, b) => rankKey(a) - rankKey(b))[0] || null;
 }
+function scoreContentCandidate(value) {
+  const text = safeString(value).trim();
+  if (!text) return -1;
+  const codeBoost = looksLikeCodePayload(text) ? 100000 : 0;
+  return codeBoost + text.length;
+}
+function pickBestContentValue(values = []) {
+  let best = null;
+  let bestScore = -1;
+  for (const value of values) {
+    if (!hasText(value)) continue;
+    const score = scoreContentCandidate(value);
+    if (score > bestScore) {
+      bestScore = score;
+      best = safeString(value);
+    }
+  }
+  return best;
+}
 
 function getGeneratedContentValue({ args = null, workflowState = null } = {}) {
   const a = isPlainObject(args) ? args : {};
   const ss = isPlainObject(workflowState?.semanticState) ? workflowState.semanticState : {};
-  const candidates = [
+  const generatedCandidates = [
+    ss.generatedContent?.content,
+    ss.generatedCode,
+    a.generatedCode,
+    a.generatedContent?.content,
+  ];
+  const directCodeCandidates = [
     a.content,
     a.body,
     a.source,
     a.text,
     a.code,
     a.snippet,
-    a.generatedCode,
-    ss.generatedCode,
-    ss.generatedContent?.content,
-  ];
-  for (const c of candidates) {
-    if (hasText(c)) return safeString(c);
-  }
+  ].filter((v) => hasText(v) && looksLikeCodePayload(v));
+  const best = pickBestContentValue([...generatedCandidates, ...directCodeCandidates]);
+  if (hasText(best)) return safeString(best);
   const intentCandidates = [
     a.codeIntent,
     a.contentIntent,
@@ -98,7 +189,9 @@ export function mapGeneratedContentIntoInlineSink({
   const out = isPlainObject(args) ? { ...args } : {};
   const schema = extractToolSchema(toolName, inventory);
   const directKeys = listDirectContentArgKeys(schema);
-  if (directKeys.length < 1) {
+  const fallbackKeys = inferFallbackContentArgKeys(schema);
+  const sinkKeys = directKeys.length > 0 ? directKeys : fallbackKeys;
+  if (sinkKeys.length < 1) {
     return {
       args: out,
       mapped: false,
@@ -109,11 +202,11 @@ export function mapGeneratedContentIntoInlineSink({
   }
 
   const required = getRequired(schema);
-  const requiredDirectKeys = required.filter((k) => directKeys.includes(k));
+  const requiredDirectKeys = required.filter((k) => sinkKeys.includes(k));
   const selectedContentField =
     pickPreferredKey(requiredDirectKeys) ||
-    pickPreferredKey(directKeys);
-  const existingField = directKeys.find((k) => hasText(out[k])) || null;
+    pickPreferredKey(sinkKeys);
+  const existingField = sinkKeys.find((k) => hasText(out[k])) || null;
   const contentValue = getGeneratedContentValue({ args: out, workflowState });
 
   if (!hasText(contentValue)) {
@@ -121,7 +214,7 @@ export function mapGeneratedContentIntoInlineSink({
       args: out,
       mapped: false,
       selectedContentField,
-      availableContentFields: directKeys,
+      availableContentFields: sinkKeys,
       reason: "no_generated_content_value",
     };
   }
@@ -147,11 +240,27 @@ export function mapGeneratedContentIntoInlineSink({
     mapped = true;
   }
 
+  const populatedDirectValues = sinkKeys
+    .map((k) => out[k])
+    .filter((v) => hasText(v));
+  const canonicalValue = pickBestContentValue([contentValue, ...populatedDirectValues]);
+  if (selectedContentField && hasText(canonicalValue) && safeString(out[selectedContentField]) !== safeString(canonicalValue)) {
+    out[selectedContentField] = canonicalValue;
+    mapped = true;
+  }
+  for (const k of sinkKeys) {
+    if (k === selectedContentField) continue;
+    if (requiredDirectKeys.includes(k)) continue;
+    if (!hasText(out[k])) continue;
+    delete out[k];
+    mapped = true;
+  }
+
   return {
     args: out,
     mapped,
     selectedContentField,
-    availableContentFields: directKeys,
+    availableContentFields: sinkKeys,
     reason: mapped ? null : "already_mapped_or_present",
   };
 }

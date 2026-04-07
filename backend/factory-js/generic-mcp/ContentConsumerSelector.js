@@ -36,7 +36,7 @@ export function extractToolSchema(toolName, inventory) {
 
 /** String-ish schema fields that can carry full generated body/source at write time. */
 const DIRECT_CONTENT_NAME_RE =
-  /^(content|body|source|text|code|snippet|script|scriptbody|scriptBody|filecontent|fileContent|sourcecode|sourceCode|raw|data)$/i;
+  /^(content|body|source|text|code|snippet|scriptbody|scriptBody|filecontent|fileContent|sourcecode|sourceCode|raw|data)$/i;
 
 const DIRECT_CONTENT_NORMALIZED_KEYS = new Set([
   "content",
@@ -45,7 +45,6 @@ const DIRECT_CONTENT_NORMALIZED_KEYS = new Set([
   "text",
   "code",
   "snippet",
-  "script",
   "scriptbody",
   "scriptcontent",
   "scriptcode",
@@ -66,10 +65,29 @@ function normalizeContentKey(key) {
   return safeString(key).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+function schemaAllowsStringContent(propSchema) {
+  const schema = isPlainObject(propSchema) ? propSchema : {};
+  const directType = schema.type;
+  if (typeof directType === "string") {
+    return directType.trim().toLowerCase() === "string";
+  }
+  if (Array.isArray(directType)) {
+    return directType.some((entry) => safeString(entry).trim().toLowerCase() === "string");
+  }
+  const unionKeys = ["anyOf", "oneOf", "allOf"];
+  for (const key of unionKeys) {
+    const variants = Array.isArray(schema[key]) ? schema[key] : [];
+    for (const variant of variants) {
+      if (!isPlainObject(variant)) continue;
+      if (schemaAllowsStringContent(variant)) return true;
+    }
+  }
+  return false;
+}
+
 function propertyLooksLikeDirectContentString(key, propSchema) {
   const k = safeString(key).trim();
-  const t = safeString(propSchema?.type).trim().toLowerCase();
-  if (t && t !== "string") return false;
+  if (!schemaAllowsStringContent(propSchema)) return false;
 
   if (DIRECT_CONTENT_NAME_RE.test(k)) return true;
   const normalized = normalizeContentKey(k);

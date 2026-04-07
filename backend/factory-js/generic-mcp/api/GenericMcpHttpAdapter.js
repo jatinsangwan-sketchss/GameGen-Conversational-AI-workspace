@@ -15,6 +15,10 @@ function asStringArray(value) {
     ? value.map((v) => normalizeInput(v)).filter(Boolean)
     : [];
 }
+function normalizeRunMode(value) {
+  const mode = normalizeInput(value).toLowerCase();
+  return mode === "online" ? "online" : "local";
+}
 
 export class GenericMcpHttpAdapterError extends Error {
   constructor(message, { httpStatus = 400, code = "bad_request", details = null } = {}) {
@@ -29,19 +33,26 @@ export class GenericMcpHttpAdapterError extends Error {
 export class GenericMcpHttpAdapter {
   constructor({
     runner,
+    localRunner = null,
+    onlineRunner = null,
     sessionStore,
     mcpConfig = null,
     defaultProjectPath = null,
     sessionManager = null,
     debug = false,
   } = {}) {
-    if (!runner || typeof runner.run !== "function") {
-      throw new Error("GenericMcpHttpAdapter requires a runner with run(...).");
+    const fallbackRunner = localRunner ?? runner ?? null;
+    if (!fallbackRunner || typeof fallbackRunner.run !== "function") {
+      throw new Error("GenericMcpHttpAdapter requires a local runner with run(...).");
+    }
+    if (onlineRunner != null && typeof onlineRunner.run !== "function") {
+      throw new Error("GenericMcpHttpAdapter onlineRunner must expose run(...).");
     }
     if (!sessionStore || typeof sessionStore.ensureSession !== "function") {
       throw new Error("GenericMcpHttpAdapter requires a sessionStore.");
     }
-    this._runner = runner;
+    this._localRunner = fallbackRunner;
+    this._onlineRunner = onlineRunner ?? fallbackRunner;
     this._sessionStore = sessionStore;
     this._mcpConfig = mcpConfig;
     this._defaultProjectPath = normalizeInput(defaultProjectPath) || null;
@@ -50,7 +61,8 @@ export class GenericMcpHttpAdapter {
     this._debug = Boolean(debug);
   }
 
-  async handleRun(payload) {
+  async handleRun(payload, { runMode = "local" } = {}) {
+    const normalizedRunMode = normalizeRunMode(runMode);
     const body = this._validateObjectPayload(payload);
     const input = this._requireNonEmptyField(body, "input");
     const responseMode = this._resolveResponseMode(body);
@@ -61,7 +73,8 @@ export class GenericMcpHttpAdapter {
     });
 
     const session = this._sessionStore.ensureSession(rawSessionId, { projectPath });
-    const runResult = await this._runner.run({
+    const runner = this._resolveRunnerForMode(normalizedRunMode);
+    const runResult = await runner.run({
       userRequest: input,
       projectRoot: projectPath,
       mcpConfig: this._mcpConfig,
@@ -77,12 +90,14 @@ export class GenericMcpHttpAdapter {
     });
     this._sessionStore.setRunResult(session.sessionId, runResult, {
       projectPath: resolvedProjectPath,
+      runMode: normalizedRunMode,
     });
     return this._ok(
       this._buildRunResponseBody({
         sessionId: session.sessionId,
         runResult,
         responseMode,
+        runMode: normalizedRunMode,
       })
     );
   }
@@ -111,7 +126,9 @@ export class GenericMcpHttpAdapter {
     const projectPath = this._resolveProjectPath(body.projectPath || session.projectPath, {
       sessionProjectPath: session.projectPath,
     });
-    const runResult = await this._runner.run({
+    const runMode = normalizeRunMode(session.runMode);
+    const runner = this._resolveRunnerForMode(runMode);
+    const runResult = await runner.run({
       userRequest: input,
       projectRoot: projectPath,
       mcpConfig: this._mcpConfig,
@@ -127,12 +144,14 @@ export class GenericMcpHttpAdapter {
     });
     this._sessionStore.setRunResult(sessionId, runResult, {
       projectPath: resolvedProjectPath,
+      runMode,
     });
     return this._ok(
       this._buildRunResponseBody({
         sessionId,
         runResult,
         responseMode,
+        runMode,
       })
     );
   }
@@ -221,17 +240,20 @@ export class GenericMcpHttpAdapter {
     return mode === "full" ? "full" : "compact";
   }
 
-  _buildRunResponseBody({ sessionId, runResult, responseMode = "compact" } = {}) {
+  _buildRunResponseBody({ sessionId, runResult, responseMode = "compact", runMode = "local" } = {}) {
     const id = normalizeInput(sessionId) || null;
     const result = isPlainObject(runResult) ? runResult : {};
+    const mode = normalizeRunMode(runMode);
     if (responseMode === "full") {
       return {
         sessionId: id,
+        runMode: mode,
         ...result,
       };
     }
     const out = {
       sessionId: id,
+      runMode: mode,
       ok: Boolean(result.ok),
       status: normalizeInput(result.status) || null,
       reason: result.reason ?? null,
@@ -278,6 +300,11 @@ export class GenericMcpHttpAdapter {
     }
     out.resumeAvailable = out.status === "needs_input" || out.status === "paused";
     return out;
+  }
+
+  _resolveRunnerForMode(runMode) {
+    const mode = normalizeRunMode(runMode);
+    return mode === "online" ? this._onlineRunner : this._localRunner;
   }
 
   _compactTaskQueue(taskQueue = {}) {

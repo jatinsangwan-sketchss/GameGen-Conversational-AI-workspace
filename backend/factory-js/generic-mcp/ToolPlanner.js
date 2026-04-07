@@ -73,6 +73,25 @@ function normalizePlannerEntry(entry) {
     category: safeString(raw.category).trim() || null,
   };
 }
+function isLikelyJsonParseFailure(error) {
+  const text = safeString(error?.message ?? error).toLowerCase();
+  if (!text) return false;
+  return (
+    text.includes("not valid json") ||
+    text.includes("unexpected token") ||
+    text.includes("json.parse") ||
+    text.includes("property name")
+  );
+}
+function buildJsonRepairPrompt(prompt) {
+  const base = safeString(prompt).trim();
+  return [
+    base,
+    "",
+    "IMPORTANT: Return ONLY one valid JSON object.",
+    "Do not include markdown fences, comments, prose, or any text before/after JSON.",
+  ].join("\n");
+}
 
 function normalizeMissingArgs(args) {
   return Array.isArray(args)
@@ -458,9 +477,23 @@ export class ToolPlanner {
 
   _hasSessionProjectPath(sessionContext) {
     const sc = isPlainObject(sessionContext) ? sessionContext : {};
-    const direct = safeString(sc.connectedProjectPath || sc.projectPath || sc.projectRoot).trim();
-    const nested = safeString(sc?.sessionStatus?.connectedProjectPath || sc?.sessionStatus?.projectRoot).trim();
-    return Boolean(direct || nested);
+    const candidates = [
+      sc.connectedProjectPath,
+      sc.projectPath,
+      sc.projectRoot,
+      sc?.sessionStatus?.connectedProjectPath,
+      sc?.sessionStatus?.projectPath,
+      sc?.sessionStatus?.projectRoot,
+      sc?.sessionStatus?.desiredProjectRoot,
+      sc?.status?.connectedProjectPath,
+      sc?.status?.projectPath,
+      sc?.status?.projectRoot,
+      sc?.status?.desiredProjectRoot,
+      sc?.session?.connectedProjectPath,
+      sc?.session?.projectPath,
+      sc?.session?.projectRoot,
+    ];
+    return candidates.some((value) => Boolean(safeString(value).trim()));
   }
 
   _shouldEscalateAttempt(plan) {
@@ -627,13 +660,28 @@ export class ToolPlanner {
     if (!this._modelClient || typeof this._modelClient.generate !== "function") {
       return { ok: false, error: "Model client is not configured. Expected modelClient.generate({ prompt })." };
     }
-    try {
-      const res = await this._modelClient.generate({ prompt });
+    const requestPlannerJson = async (plannerPrompt) => {
+      const res = await this._modelClient.generate({
+        prompt: plannerPrompt,
+        responseFormat: "json_object",
+      });
       const text = safeString(res?.text ?? res).trim();
       const parsed = parseJsonObjectLoose(text);
-      return { ok: true, parsed, rawText: text, rawResponse: res };
+      return { parsed, rawText: text, rawResponse: res };
+    };
+    try {
+      const primary = await requestPlannerJson(prompt);
+      return { ok: true, ...primary };
     } catch (err) {
-      return { ok: false, error: safeString(err?.message ?? err) || "Planner model call failed." };
+      if (!isLikelyJsonParseFailure(err)) {
+        return { ok: false, error: safeString(err?.message ?? err) || "Planner model call failed." };
+      }
+      try {
+        const repaired = await requestPlannerJson(buildJsonRepairPrompt(prompt));
+        return { ok: true, ...repaired };
+      } catch (retryErr) {
+        return { ok: false, error: safeString(retryErr?.message ?? retryErr) || "Planner model call failed." };
+      }
     }
   }
 

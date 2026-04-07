@@ -40,6 +40,7 @@ function makeRecord({ sessionId, projectPath = null }) {
   return {
     sessionId,
     projectPath: normalizeProjectPath(projectPath),
+    runMode: null,
     createdAt: now,
     updatedAt: now,
     lastRunResult: null,
@@ -80,7 +81,7 @@ export class GenericMcpSessionStore {
     return clone(record);
   }
 
-  setRunResult(sessionId, runResult, { projectPath = null } = {}) {
+  setRunResult(sessionId, runResult, { projectPath = null, runMode = null } = {}) {
     const rec = this.ensureSession(sessionId, { projectPath });
     const id = rec.sessionId;
     const next = this._sessions.get(id);
@@ -90,6 +91,10 @@ export class GenericMcpSessionStore {
     next.pendingNeedsInput = isResumableRunResult(runResult) ? clone(runResult) : null;
     if (projectPath != null) {
       next.projectPath = normalizeProjectPath(projectPath);
+    }
+    if (runMode != null) {
+      const mode = safeString(runMode).trim().toLowerCase();
+      next.runMode = mode || null;
     }
     next.updatedAt = new Date().toISOString();
     this._touch(id, next);

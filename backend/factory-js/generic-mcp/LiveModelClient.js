@@ -18,6 +18,10 @@ export const DEFAULT_OLLAMA_MODEL_NAME = "gpt-oss:20b";
 function safeString(value) {
   return value == null ? "" : String(value);
 }
+function normalizeResponseFormat(value) {
+  const v = safeString(value).trim().toLowerCase();
+  return v === "json_object" ? "json_object" : null;
+}
 
 export class LiveModelClient {
   constructor({
@@ -43,11 +47,12 @@ export class LiveModelClient {
     );
   }
 
-  async generate({ prompt }) {
+  async generate({ prompt, responseFormat = null } = {}) {
     const p = safeString(prompt);
     if (!p.trim()) throw new Error("LiveModelClient requires non-empty prompt.");
     this._logModelRequestDebug();
-    if (this._backend === "openai") return this._generateOpenAiCompatible(p);
+    const format = normalizeResponseFormat(responseFormat);
+    if (this._backend === "openai") return this._generateOpenAiCompatible(p, { responseFormat: format });
     return this._generateLlama(p);
   }
 
@@ -65,13 +70,22 @@ export class LiveModelClient {
     return { text };
   }
 
-  async _generateOpenAiCompatible(prompt) {
-    const url = `${this._baseUrl}/v1/responses`;
-    const body = {
-      model: this._model,
-      input: prompt,
-      temperature: 0,
-    };
+  async _generateOpenAiCompatible(prompt, { responseFormat = null } = {}) {
+    const format = normalizeResponseFormat(responseFormat);
+    const useJsonMode = format === "json_object";
+    const url = useJsonMode ? `${this._baseUrl}/v1/chat/completions` : `${this._baseUrl}/v1/responses`;
+    const body = useJsonMode
+      ? {
+          model: this._model,
+          messages: [{ role: "user", content: prompt }],
+          response_format: { type: "json_object" },
+          temperature: 0,
+        }
+      : {
+          model: this._model,
+          input: prompt,
+          temperature: 0,
+        };
     const headers = this._apiKey ? { Authorization: `Bearer ${this._apiKey}` } : {};
     const json = await this._postJson(url, body, {
       contentType: "application/json",

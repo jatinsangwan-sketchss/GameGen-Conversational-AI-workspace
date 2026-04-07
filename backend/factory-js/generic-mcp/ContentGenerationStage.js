@@ -29,9 +29,29 @@ function buildPrompt({ contentIntent, toolName, semanticState, args, generationC
   ].join("\n");
 }
 
-function fallbackGenerateContent(intent) {
+function fallbackGenerateContent(intent, { toolName = "", generationContext = null } = {}) {
   const t = safeString(intent).trim();
   const lower = t.toLowerCase();
+  const toolLower = safeString(toolName).trim().toLowerCase();
+  const runtime = safeString(generationContext?.runtime).trim().toLowerCase();
+  const artifactKind = safeString(generationContext?.artifactKind).trim().toLowerCase();
+  const scriptLikeTool =
+    /(^|[_\-\s])(script|code|gdscript|create|write|save)([_\-\s]|$)/.test(toolLower) ||
+    artifactKind === "script" ||
+    runtime === "godot";
+  if (scriptLikeTool) {
+    return {
+      kind: "code_snippet",
+      content: [
+        "extends Node",
+        "",
+        "func _ready():",
+        `  # TODO: ${t || "implement requested behavior"}`,
+        "  pass",
+      ].join("\n"),
+      summary: "Generated script scaffold from semantic intent fallback.",
+    };
+  }
   if (lower.includes("print") && lower.includes("hello")) {
     return {
       kind: "code_snippet",
@@ -158,7 +178,7 @@ export async function ensureGeneratedContentForStep({
   let generated = null;
   if (modelClient && typeof modelClient.generate === "function") {
     try {
-      const res = await modelClient.generate({ prompt });
+      const res = await modelClient.generate({ prompt, responseFormat: "json_object" });
       console.log("[VERIFY][contentgen-raw-output]", res ?? null);
       const parsed = parseGeneratedPayload(res?.text ?? res);
       if (isPlainObject(parsed) && safeString(parsed.content).trim()) {
@@ -192,7 +212,7 @@ export async function ensureGeneratedContentForStep({
       });
       return out;
     }
-    const fb = fallbackGenerateContent(contentIntent);
+    const fb = fallbackGenerateContent(contentIntent, { toolName, generationContext });
     generated = {
       kind: fb.kind,
       content: fb.content,

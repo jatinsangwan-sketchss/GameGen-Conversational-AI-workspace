@@ -18,6 +18,7 @@
 
 import {
   isCreatablePathArgName,
+  sanitizeFileStem,
   synthesizeMissingCreationPath,
 } from "./PathSynthesizer.js";
 import { defaultPathPolicyForArg } from "./PathPolicy.js";
@@ -213,6 +214,7 @@ export class ArgumentResolver {
         toolName: name,
         args: withSession.args,
         inventory: liveInventory,
+        workflowState,
       });
       const classifiedAfterSynth = this.classifyArgs({ toolName: name, args: synthesized.args, inventory: liveInventory });
       const fileResolved = await this.resolveFileRefs({
@@ -444,11 +446,14 @@ export class ArgumentResolver {
    * Fills missing required path args from structured creation intent (planner args).
    * Synthesized keys skip ResourceResolver (non-existent paths are not index lookups).
    */
-  synthesizeCreationPaths({ toolName, args, inventory = null } = {}) {
+  synthesizeCreationPaths({ toolName, args, inventory = null, workflowState = null } = {}) {
     const out = { ...(isPlainObject(args) ? args : {}) };
     const synthesizedKeys = new Set();
+    const schema = this._getToolSchema(toolName, inventory ?? this._toolInventory);
     const required = this._getRequiredArgs(toolName, inventory ?? this._toolInventory);
-    for (const key of required) {
+    const props = isPlainObject(schema?.properties) ? Object.keys(schema.properties) : [];
+    const candidates = [...new Set([...required, ...props.filter((k) => isCreatablePathArgName(k))])];
+    for (const key of candidates) {
       const val = out[key];
       if (val != null && safeString(val).trim() !== "") continue;
       if (!isCreatablePathArgName(key)) continue;
@@ -470,7 +475,101 @@ export class ArgumentResolver {
         }
       }
     }
+    this._applyCanonicalCreateScriptPathAliases({
+      toolName,
+      args: out,
+      workflowState,
+      schema,
+      required,
+      synthesizedKeys,
+    });
     return { args: out, synthesizedKeys };
+  }
+
+  _applyCanonicalCreateScriptPathAliases({
+    toolName = "",
+    args = {},
+    workflowState = null,
+    schema = null,
+    required = [],
+    synthesizedKeys = null,
+  } = {}) {
+    const out = isPlainObject(args) ? args : {};
+    const keySet = synthesizedKeys instanceof Set ? synthesizedKeys : new Set();
+    const createLike = this._isCreateLikeArtifactStep({ toolName, args: out, workflowState });
+    if (!createLike) return;
+    const canonical = this._deriveCanonicalScriptCreationPath({ toolName, args: out, workflowState });
+    if (!canonical) return;
+    const schemaProps = isPlainObject(schema?.properties) ? Object.keys(schema.properties) : [];
+    const requiredKeys = Array.isArray(required) ? required : [];
+    const candidateKeys = [...new Set([...Object.keys(out), ...schemaProps, ...requiredKeys])];
+    for (const key of candidateKeys) {
+      const nk = normalizeKey(key);
+      if (!nk || this._isProjectPathKey(nk) || this._isNodeTargetKey(nk)) continue;
+      const isScriptArtifactKey =
+        nk === "path" ||
+        nk.includes("scriptpath") ||
+        nk.includes("filepath") ||
+        nk.includes("artifactpath") ||
+        nk.includes("scriptref") ||
+        nk.includes("fileref") ||
+        nk.includes("artifactref");
+      if (!isScriptArtifactKey) continue;
+      const previous = safeString(out[key]).trim();
+      const previousNormalized = normalizeProjectRelativePath(previous);
+      if (previousNormalized === canonical) continue;
+      out[key] = canonical;
+      keySet.add(key);
+    }
+  }
+
+  _deriveCanonicalScriptCreationPath({ toolName = "", args = {}, workflowState = null } = {}) {
+    const out = isPlainObject(args) ? args : {};
+    const nested = isPlainObject(out.creationIntent) ? out.creationIntent : {};
+    const semanticCreation = isPlainObject(workflowState?.semanticState?.creationIntent)
+      ? workflowState.semanticState.creationIntent
+      : (isPlainObject(workflowState?.semanticIntent?.creationIntent) ? workflowState.semanticIntent.creationIntent : {});
+    const requestedName =
+      safeString(out.requestedName).trim() ||
+      safeString(out.requested_name).trim() ||
+      safeString(out.name).trim() ||
+      safeString(out.scriptName).trim() ||
+      safeString(out.fileName).trim() ||
+      safeString(nested.requestedName).trim() ||
+      safeString(nested.requested_name).trim() ||
+      safeString(nested.name).trim() ||
+      safeString(semanticCreation.requestedName).trim() ||
+      safeString(semanticCreation.requested_name).trim() ||
+      safeString(semanticCreation.name).trim() ||
+      "";
+    if (!requestedName) return null;
+    const explicitRootFolder = [".", "./", "/"].includes(safeString(out.targetFolder || nested.targetFolder).trim());
+    const folderRaw =
+      safeString(out.targetFolder).trim() ||
+      safeString(out.target_folder).trim() ||
+      safeString(out.folder).trim() ||
+      safeString(out.directory).trim() ||
+      safeString(nested.targetFolder).trim() ||
+      safeString(nested.folder).trim() ||
+      safeString(semanticCreation.targetFolder).trim() ||
+      safeString(semanticCreation.folder).trim() ||
+      "";
+    const normalizedFolder = normalizeProjectRelativePath(folderRaw);
+    const folder = explicitRootFolder
+      ? ""
+      : ((safeString(normalizedFolder).replace(/^\.\/+/, "").replace(/\/+$/, "") || "scripts"));
+    const resourceKind =
+      safeString(out.resourceKind || out.resource_kind || nested.resourceKind || semanticCreation.resourceKind).trim().toLowerCase() ||
+      "";
+    const toolLower = safeString(toolName).toLowerCase();
+    const scriptLike =
+      resourceKind === "script" ||
+      /\.gd$/i.test(requestedName) ||
+      /(^|[_\-\s])script([_\-\s]|$)/.test(toolLower);
+    if (!scriptLike) return null;
+    const stem = sanitizeFileStem(requestedName);
+    if (!stem) return null;
+    return folder ? `${folder}/${stem}.gd` : `${stem}.gd`;
   }
 
   async resolveFileRefs({ toolName, args, classification, synthesizedKeys = new Set(), sessionInjectedKeys = [], workflowState = null } = {}) {
@@ -485,7 +584,8 @@ export class ArgumentResolver {
     // console.log("[ArgumentResolver] anoher one ",{ args:out});
 
     const opMode = safeString(workflowState?.artifactOperation?.mode).trim().toLowerCase();
-    const requiresExistingTarget = opMode === "modify_existing" || opMode === "modify_then_attach" || opMode === "attach_existing";
+    const createLikeStep = this._isCreateLikeArtifactStep({ toolName, args: out, classification, workflowState });
+    const requiresExistingTarget = !createLikeStep && (opMode === "modify_existing" || opMode === "modify_then_attach" || opMode === "attach_existing");
     const isAttachMode = opMode === "attach_existing" || opMode === "create_then_attach" || opMode === "modify_then_attach";
     const typedAttachRefs = ["scriptRef", "fileRef", "resourceRef", "artifactRef"];
     const mergedKeys = [...keys];
@@ -508,13 +608,20 @@ export class ArgumentResolver {
         continue;
       }
       const role = safeString(roleMeta?.role).trim().toLowerCase();
+      const normalizedKey = normalizeKey(key);
+      const semanticSlot = safeString(roleMeta?.semanticSlot).trim().toLowerCase();
+      const isArtifactTargetRef =
+        this._isArtifactPathKey(normalizedKey) ||
+        semanticSlot.includes("scriptref") ||
+        semanticSlot.includes("fileref") ||
+        semanticSlot.includes("resourceref") ||
+        semanticSlot.includes("artifactref");
       // Policy layer: existing refs (must_exist) resolve via index; create/new path
       // targets (may_not_exist_yet) pass through without not_found checks.
       const policy = defaultPathPolicyForArg(key, out, {
         synthesized: synthesizedKeys.has(key),
         sessionInjected: sessionInjectedSet.has(key),
       });
-      const normalizedKey = normalizeKey(key);
       const isPathLikeRef = this._isFileResourceRefKey(normalizedKey);
       if (isPathLikeRef && role === "creation_intent_derived") {
         policy.existencePolicy = "may_not_exist_yet";
@@ -522,9 +629,16 @@ export class ArgumentResolver {
           policy.provenance = "creation_intent_derived";
         }
       } else if (isPathLikeRef && role === "semantic_ref") {
-        policy.existencePolicy = "must_exist";
-        if (!safeString(policy.provenance).trim()) {
-          policy.provenance = "resolved_existing_ref";
+        if (createLikeStep && isArtifactTargetRef) {
+          policy.existencePolicy = "may_not_exist_yet";
+          if (!safeString(policy.provenance).trim()) {
+            policy.provenance = "creation_intent_derived";
+          }
+        } else {
+          policy.existencePolicy = "must_exist";
+          if (!safeString(policy.provenance).trim()) {
+            policy.provenance = "resolved_existing_ref";
+          }
         }
       }
       if (requiresExistingTarget && isPathLikeRef) {
@@ -819,6 +933,70 @@ export class ArgumentResolver {
     );
   }
 
+  _isArtifactPathKey(normalized) {
+    return (
+      normalized.includes("scriptref") ||
+      normalized.includes("fileref") ||
+      normalized.includes("resourceref") ||
+      normalized.includes("artifactref") ||
+      normalized.includes("scriptpath") ||
+      normalized.includes("filepath") ||
+      normalized.includes("resourcepath") ||
+      normalized.includes("artifactpath") ||
+      normalized === "path"
+    );
+  }
+
+  _hasCreationIntentSignals(args = {}, workflowState = null) {
+    const a = isPlainObject(args) ? args : {};
+    const nested = isPlainObject(a.creationIntent) ? a.creationIntent : {};
+    const semanticStateCreation = isPlainObject(workflowState?.semanticState?.creationIntent)
+      ? workflowState.semanticState.creationIntent
+      : {};
+    const semanticIntentCreation = isPlainObject(workflowState?.semanticIntent?.creationIntent)
+      ? workflowState.semanticIntent.creationIntent
+      : {};
+    const goalText = safeString(workflowState?.semanticIntent?.goalText).trim();
+    const hasRequestedName = Boolean(
+      safeString(a.requestedName).trim() ||
+      safeString(nested.requestedName).trim() ||
+      safeString(semanticStateCreation.requestedName).trim() ||
+      safeString(semanticIntentCreation.requestedName).trim()
+    );
+    const hasTargetFolder = Boolean(
+      safeString(a.targetFolder).trim() ||
+      safeString(nested.targetFolder).trim() ||
+      safeString(semanticStateCreation.targetFolder).trim() ||
+      safeString(semanticIntentCreation.targetFolder).trim()
+    );
+    const hasCreateFlag =
+      a.create === true ||
+      a.isCreate === true ||
+      a.isNew === true ||
+      nested.create === true ||
+      nested.isCreate === true ||
+      nested.isNew === true ||
+      semanticStateCreation.create === true ||
+      semanticStateCreation.isCreate === true ||
+      semanticStateCreation.isNew === true ||
+      semanticIntentCreation.create === true ||
+      semanticIntentCreation.isCreate === true ||
+      semanticIntentCreation.isNew === true;
+    return hasRequestedName || hasTargetFolder || hasCreateFlag || /\b(create|new|generate|scaffold)\b/i.test(goalText);
+  }
+
+  _isCreateLikeArtifactStep({ toolName = "", args = {}, classification = null, workflowState = null } = {}) {
+    const opMode = safeString(workflowState?.artifactOperation?.mode).trim().toLowerCase();
+    if (opMode.startsWith("create_")) return true;
+    const rolesByArg = isPlainObject(classification?.rolesByArg) ? classification.rolesByArg : {};
+    for (const meta of Object.values(rolesByArg)) {
+      if (safeString(meta?.role).trim().toLowerCase() === "creation_intent_derived") return true;
+    }
+    const normalizedToolName = safeString(toolName).replace(/[_-]+/g, " ").toLowerCase();
+    if (/\b(create|new|generate|scaffold|init)\b/.test(normalizedToolName)) return true;
+    return this._hasCreationIntentSignals(args, workflowState);
+  }
+
   _extractResolvedScenePath(args, workflowState = null) {
     const out = isPlainObject(args) ? args : {};
     const semState = isPlainObject(workflowState?.semanticState) ? workflowState.semanticState : {};
@@ -1101,7 +1279,11 @@ export class ArgumentResolver {
       workflowState,
       semanticIntent: workflowState?.semanticIntent,
     });
-    const contractValidatedArgs = isPlainObject(readiness?.args) ? readiness.args : argsWithSink;
+    const contractValidatedArgs = this._normalizeStructuredModifyPayloadForContract({
+      toolName,
+      args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
+      inventory,
+    });
     const modificationTypeValidation = this._validateRequestedModificationTypesAgainstContract({
       toolName,
       args: contractValidatedArgs,
@@ -1159,7 +1341,7 @@ export class ArgumentResolver {
 
     const modifyGate = this._ensureModifyExistingTargetResolution({
       toolName,
-      args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
+      args: contractValidatedArgs,
       argMeta: inMeta,
       inventory,
       workflowState,
@@ -1201,7 +1383,7 @@ export class ArgumentResolver {
     }
     const attachGate = this._ensureAttachExistingDualResolution({
       toolName,
-      args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
+      args: contractValidatedArgs,
       argMeta: inMeta,
       workflowState,
     });
@@ -1231,9 +1413,14 @@ export class ArgumentResolver {
         reason: attachGate.reason || null,
       };
     }
+    const collapsedInlineArgs = this._collapseInlineContentAliases({
+      toolName,
+      args: contractValidatedArgs,
+      inventory,
+    });
     return {
       status: "ready",
-      args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
+      args: collapsedInlineArgs,
       argMeta: inMeta,
       reason: null,
     };
@@ -1343,13 +1530,24 @@ export class ArgumentResolver {
   }
 
   _extractGeneratedContent({ args = {}, workflowState = null } = {}) {
-    const direct = [
+    const generatedCandidates = [
+      safeString(workflowState?.semanticState?.generatedContent?.content).trim(),
+      safeString(workflowState?.semanticState?.generatedCode).trim(),
+      safeString(args?.generatedCode).trim(),
+      safeString(args?.generatedContent?.content).trim(),
+    ].filter(Boolean);
+    const directCodeCandidates = [
       safeString(args?.content).trim(),
       safeString(args?.body).trim(),
       safeString(args?.source).trim(),
       safeString(args?.text).trim(),
-    ].find(Boolean);
-    if (direct) return direct;
+      safeString(args?.code).trim(),
+      safeString(args?.snippet).trim(),
+      safeString(args?.script).trim(),
+      safeString(args?.template).trim(),
+    ].filter((value) => looksLikeCodePayload(value));
+    const preferred = this._pickBestInlineContentValue([...generatedCandidates, ...directCodeCandidates]);
+    if (hasNonEmpty(preferred)) return safeString(preferred).trim();
     const intentCandidate = [
       args?.codeIntent,
       args?.contentIntent,
@@ -1384,7 +1582,11 @@ export class ArgumentResolver {
       const keys = Object.keys(props).filter((k) => this._looksLikeInlineContentField(k));
       for (const key of keys.slice(0, 4)) {
         const next = { ...base };
-        if (!hasNonEmpty(next[key])) next[key] = content;
+        const existing = safeString(next[key]).trim();
+        const shouldOverride =
+          !hasNonEmpty(existing) ||
+          (looksLikeCodePayload(content) && !looksLikeCodePayload(existing));
+        if (shouldOverride) next[key] = content;
         pushVariant(next);
       }
     }
@@ -1400,7 +1602,92 @@ export class ArgumentResolver {
 
   _looksLikeInlineContentField(key) {
     const nk = normalizeKey(key);
-    return nk.includes("content") || nk.includes("body") || nk.includes("source") || nk.includes("text") || nk.includes("code");
+    if (nk.includes("path") || nk.endsWith("ref") || nk.includes("project")) return false;
+    return (
+      nk === "script" ||
+      nk.includes("content") ||
+      nk.includes("body") ||
+      nk.includes("source") ||
+      nk.includes("text") ||
+      nk.includes("code") ||
+      nk.includes("snippet") ||
+      nk.includes("template")
+    );
+  }
+
+  _inlineContentPriority(key = "") {
+    const lower = safeString(key).trim().toLowerCase();
+    const priority = [
+      "content",
+      "scriptcontent",
+      "body",
+      "source",
+      "text",
+      "code",
+      "snippet",
+      "sourcecode",
+      "filecontent",
+      "raw",
+      "data",
+    ];
+    const idx = priority.indexOf(lower);
+    return idx >= 0 ? idx : priority.length + 1;
+  }
+
+  _pickPreferredInlineContentKey(keys = [], required = []) {
+    const reqSet = new Set((Array.isArray(required) ? required : []).map((k) => safeString(k).trim()).filter(Boolean));
+    const ordered = [...(Array.isArray(keys) ? keys : [])]
+      .map((k) => safeString(k).trim())
+      .filter(Boolean)
+      .sort((a, b) => this._inlineContentPriority(a) - this._inlineContentPriority(b));
+    const requiredPick = ordered.find((k) => reqSet.has(k));
+    return requiredPick || ordered[0] || null;
+  }
+
+  _scoreInlineContentValue(value) {
+    const text = safeString(value).trim();
+    if (!text) return -1;
+    const codeBoost = looksLikeCodePayload(text) ? 100000 : 0;
+    return codeBoost + text.length;
+  }
+
+  _pickBestInlineContentValue(values = []) {
+    let best = null;
+    let bestScore = -1;
+    for (const value of values) {
+      if (!hasNonEmpty(value)) continue;
+      const score = this._scoreInlineContentValue(value);
+      if (score > bestScore) {
+        bestScore = score;
+        best = safeString(value);
+      }
+    }
+    return best;
+  }
+
+  _collapseInlineContentAliases({ toolName, args = {}, inventory = null } = {}) {
+    const out = isPlainObject(args) ? { ...args } : {};
+    const schema = this._getToolSchema(toolName, inventory);
+    const props = isPlainObject(schema?.properties) ? schema.properties : {};
+    const inlineKeys = Object.keys(props).filter((k) => this._looksLikeInlineContentField(k));
+    if (inlineKeys.length < 2) return out;
+    const required = Array.isArray(schema?.required)
+      ? schema.required.map((k) => safeString(k).trim()).filter(Boolean)
+      : [];
+    const selected = this._pickPreferredInlineContentKey(inlineKeys, required);
+    if (!selected) return out;
+    const candidates = inlineKeys.map((k) => out[k]).filter((v) => hasNonEmpty(v));
+    const canonical = this._pickBestInlineContentValue(candidates);
+    if (!hasNonEmpty(canonical)) return out;
+    out[selected] = canonical;
+    const requiredSet = new Set(required);
+    for (const key of inlineKeys) {
+      if (key === selected) continue;
+      if (requiredSet.has(key)) continue;
+      if (!hasNonEmpty(out[key])) continue;
+      delete out[key];
+    }
+    return out;
   }
 
   _pickPreferredCompileFailure(current, next) {
@@ -1434,7 +1721,8 @@ export class ArgumentResolver {
 
   _ensureModifyExistingTargetResolution({ toolName, args, argMeta = null, workflowState = null } = {}) {
     const opMode = safeString(workflowState?.artifactOperation?.mode).trim().toLowerCase();
-    const needsGate = opMode === "modify_existing" || opMode === "modify_then_attach";
+    const createLikeStep = this._isCreateLikeArtifactStep({ toolName, args, workflowState });
+    const needsGate = !createLikeStep && (opMode === "modify_existing" || opMode === "modify_then_attach");
     if (!needsGate) {
       return { ok: true, canProceed: true, resolutionStatus: "not_applicable", typedRefs: {}, typedPaths: {}, resolvedArtifactPath: null };
     }
@@ -1621,6 +1909,34 @@ export class ArgumentResolver {
     return [...out];
   }
 
+  _extractSupportedModificationTypesFromItemSchema(itemSchema = null) {
+    const itemProps = isPlainObject(itemSchema?.properties) ? itemSchema.properties : {};
+    const typeSchema = isPlainObject(itemProps?.type)
+      ? itemProps.type
+      : (isPlainObject(itemProps?.modificationType) ? itemProps.modificationType : {});
+    const out = new Set();
+    if (Array.isArray(typeSchema?.enum)) {
+      for (const v of typeSchema.enum) {
+        const t = safeString(v).trim();
+        if (t) out.add(t);
+      }
+    }
+    const typeDesc = safeString(typeSchema?.description).trim();
+    if (typeDesc) {
+      const quoted = [...typeDesc.matchAll(/[\"'`]([A-Za-z0-9_:-]+)[\"'`]/g)];
+      for (const m of quoted) {
+        const t = safeString(m?.[1]).trim();
+        if (t) out.add(t);
+      }
+      const underscored = [...typeDesc.matchAll(/\\b[a-z]+_[a-z0-9_]+\\b/gi)];
+      for (const m of underscored) {
+        const t = safeString(m?.[0]).trim();
+        if (t) out.add(t);
+      }
+    }
+    return [...out];
+  }
+
   _normalizeStructuredModifyPayloadForContract({ toolName, args = {}, inventory = null } = {}) {
     const out = isPlainObject(args) ? { ...args } : {};
     const schema = this._getToolSchema(toolName, inventory);
@@ -1629,7 +1945,20 @@ export class ArgumentResolver {
     if (!modsSchema || !itemSchema) return out;
     const requiresMods = Array.isArray(schema?.required) && schema.required.includes("modifications");
     if (!requiresMods) return out;
-    if (Array.isArray(out.modifications)) return out;
+    const supportedTypes = [
+      ...new Set([
+        ...this._extractSupportedModificationTypesFromContract({ toolName, inventory }),
+        ...this._extractSupportedModificationTypesFromItemSchema(itemSchema),
+      ]),
+    ]
+      .map((x) => safeString(x).trim())
+      .filter(Boolean);
+    if (Array.isArray(out.modifications)) {
+      out.modifications = out.modifications.map((item) =>
+        this._normalizeModificationItemAgainstContract({ item, itemSchema, supportedTypes })
+      );
+      return out;
+    }
     if (!isPlainObject(out.modifications)) return out;
 
     const entries = Object.entries(out.modifications);
@@ -1661,10 +1990,121 @@ export class ArgumentResolver {
         if (!hasNonEmpty(item.varType) && hasNonEmpty(opValue.varType)) item.varType = safeString(opValue.varType).trim();
         if (!hasNonEmpty(item.defaultValue) && item.value != null) item.defaultValue = safeString(item.value).trim();
       }
-      normalizedItems.push(item);
+      normalizedItems.push(this._normalizeModificationItemAgainstContract({ item, itemSchema, supportedTypes }));
     }
     if (normalizedItems.length > 0) {
       out.modifications = normalizedItems;
+    }
+    return out;
+  }
+
+  _firstContentLikeModificationField(itemSchema = null) {
+    const itemProps = isPlainObject(itemSchema?.properties) ? itemSchema.properties : {};
+    const keys = Object.keys(itemProps);
+    const preferred = [
+      "content",
+      "body",
+      "source",
+      "text",
+      "code",
+      "snippet",
+      "functionBody",
+      "functionCode",
+      "scriptContent",
+      "scriptBody",
+      "scriptSource",
+    ];
+    for (const key of preferred) {
+      if (Object.prototype.hasOwnProperty.call(itemProps, key)) return key;
+    }
+    return keys.find((key) => {
+      const lower = safeString(key).trim().toLowerCase();
+      return /(content|body|source|text|code|snippet)/.test(lower);
+    }) || null;
+  }
+
+  _chooseSupportedModificationType({ item = {}, supportedTypes = [] } = {}) {
+    const supported = (Array.isArray(supportedTypes) ? supportedTypes : [])
+      .map((x) => safeString(x).trim())
+      .filter(Boolean);
+    if (supported.length < 1) return null;
+    const supportedLower = new Set(supported.map((x) => x.toLowerCase()));
+    const current = safeString(item?.type).trim() || safeString(item?.kind).trim();
+    if (current && supportedLower.has(current.toLowerCase())) return current;
+
+    const field = safeString(item?.field).trim().toLowerCase();
+    const name = safeString(item?.name || item?.functionName || item?.variableName || item?.signalName).trim().toLowerCase();
+    const valueText = safeString(item?.value || item?.newValue || item?.content || item?.body || item?.source || item?.code).trim();
+
+    if (supportedLower.has("add_signal")) {
+      if (field.includes("signal") || name.includes("signal")) return "add_signal";
+    }
+    if (supportedLower.has("add_variable")) {
+      if (
+        hasNonEmpty(item?.varType) ||
+        hasNonEmpty(item?.valueType) ||
+        hasNonEmpty(item?.defaultValue) ||
+        field.includes("var") ||
+        field.includes("variable")
+      ) {
+        return "add_variable";
+      }
+    }
+    if (supportedLower.has("add_function")) {
+      if (
+        hasNonEmpty(item?.content) ||
+        hasNonEmpty(item?.body) ||
+        hasNonEmpty(item?.source) ||
+        hasNonEmpty(item?.code) ||
+        field.includes("code") ||
+        field.includes("function") ||
+        field.includes("intent") ||
+        valueText.length > 0
+      ) {
+        return "add_function";
+      }
+    }
+    return supported[0];
+  }
+
+  _normalizeModificationItemAgainstContract({ item = {}, itemSchema = null, supportedTypes = [] } = {}) {
+    const out = isPlainObject(item) ? { ...item } : {};
+    const chosenType = this._chooseSupportedModificationType({ item: out, supportedTypes });
+    if (chosenType && !safeString(out.type).trim()) out.type = chosenType;
+    if (chosenType && safeString(out.type).trim().toLowerCase() !== safeString(chosenType).trim().toLowerCase()) {
+      out.type = chosenType;
+    }
+    const loweredType = safeString(out.type).trim().toLowerCase();
+    if (loweredType === "add_function") {
+      if (!hasNonEmpty(out.name)) {
+        out.name =
+          safeString(out.functionName).trim() ||
+          basenameWithoutExt(out.target) ||
+          safeString(out.field).trim() ||
+          "generated_function";
+      }
+      const contentField = this._firstContentLikeModificationField(itemSchema);
+      if (contentField && !hasNonEmpty(out[contentField])) {
+        const payload =
+          safeString(out.content).trim() ||
+          safeString(out.body).trim() ||
+          safeString(out.source).trim() ||
+          safeString(out.code).trim() ||
+          safeString(out.value).trim() ||
+          safeString(out.newValue).trim();
+        if (payload) out[contentField] = payload;
+      }
+    } else if (loweredType === "add_variable") {
+      if (!hasNonEmpty(out.name)) {
+        out.name = safeString(out.variableName).trim() || safeString(out.field).trim() || "new_variable";
+      }
+      if (!hasNonEmpty(out.varType) && hasNonEmpty(out.valueType)) {
+        out.varType = safeString(out.valueType).trim();
+      }
+    } else if (loweredType === "add_signal") {
+      if (!hasNonEmpty(out.name)) {
+        out.name = safeString(out.signalName).trim() || safeString(out.field).trim() || "new_signal";
+      }
     }
     return out;
   }

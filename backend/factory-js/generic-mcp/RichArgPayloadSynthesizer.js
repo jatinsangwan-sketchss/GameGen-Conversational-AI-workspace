@@ -66,13 +66,126 @@ function hasTypeMatch(value, typeName) {
   if (t === "boolean") return typeof value === "boolean";
   return true;
 }
+function inferPrimitiveValueTypeToken(text) {
+  const lower = safeString(text).trim().toLowerCase();
+  if (!lower) return null;
+  if (/\bbool(?:ean)?\b/.test(lower)) return "bool";
+  if (/\bint(?:eger)?\b/.test(lower)) return "int";
+  if (/\bfloat|double|decimal|number\b/.test(lower)) return "float";
+  if (/\bstring|str\b/.test(lower)) return "String";
+  return null;
+}
+function inferDefaultValueForType(typeToken) {
+  const lower = safeString(typeToken).trim().toLowerCase();
+  if (!lower) return undefined;
+  if (lower === "bool" || lower === "boolean") return false;
+  if (lower === "int" || lower === "integer") return 0;
+  if (lower === "float" || lower === "double" || lower === "decimal" || lower === "number") return 0.0;
+  if (lower === "string" || lower === "str") return "";
+  return undefined;
+}
+function isVariableTypeFieldName(fieldName) {
+  const lower = safeString(fieldName).trim().toLowerCase();
+  if (!lower) return false;
+  return (
+    lower === "vartype" ||
+    lower === "var_type" ||
+    lower === "variabletype" ||
+    lower === "variable_type" ||
+    lower === "valuetype" ||
+    lower === "value_type" ||
+    lower === "datatype" ||
+    lower === "data_type" ||
+    lower === "typehint" ||
+    lower === "type_hint"
+  );
+}
+function isDefaultValueFieldName(fieldName) {
+  const lower = safeString(fieldName).trim().toLowerCase();
+  if (!lower) return false;
+  return (
+    lower === "defaultvalue" ||
+    lower === "default_value" ||
+    lower === "initialvalue" ||
+    lower === "initial_value" ||
+    lower === "value"
+  );
+}
+function extractNamedIdentifierListFromIntent(text) {
+  const raw = safeString(text);
+  if (!raw.trim()) return [];
+  const direct = raw.match(/\b(?:named?|name\s+them)\s+(.+?)(?:[.;!?]|$)/i);
+  const fallback = raw.match(/\bvariables?\s+([A-Za-z0-9_,\sand-]+)(?:[.;!?]|$)/i);
+  const segment = safeString(direct?.[1] || fallback?.[1]).trim();
+  if (!segment) return [];
+  const tokens = segment.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [];
+  const stopwords = new Set([
+    "add",
+    "variable",
+    "variables",
+    "var",
+    "vars",
+    "name",
+    "named",
+    "them",
+    "and",
+    "or",
+    "with",
+    "bool",
+    "boolean",
+    "int",
+    "integer",
+    "float",
+    "double",
+    "string",
+  ]);
+  const out = [];
+  const seen = new Set();
+  for (const token of tokens) {
+    const normalized = safeString(token).trim();
+    if (!normalized) continue;
+    const lower = normalized.toLowerCase();
+    if (stopwords.has(lower)) continue;
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    out.push(normalized);
+  }
+  return out;
+}
 
-function inferFieldValue({ fieldName, generatedCode, codeIntent, targetRef, semanticEdit = null, itemSchema = null } = {}) {
+function inferFieldValue({
+  fieldName,
+  generatedCode,
+  codeIntent,
+  targetRef,
+  semanticEdit = null,
+  itemSchema = null,
+  itemIndex = 0,
+  inferredNames = [],
+} = {}) {
   const name = safeString(fieldName).trim();
   const lower = name.toLowerCase();
   if (!name) return undefined;
+  const inferredType =
+    safeString(semanticEdit?.valueType).trim() ||
+    safeString(semanticEdit?.varType).trim() ||
+    safeString(semanticEdit?.typeHint).trim() ||
+    safeString(inferPrimitiveValueTypeToken(codeIntent)).trim() ||
+    safeString(inferPrimitiveValueTypeToken(generatedCode)).trim() ||
+    "";
+  if (isVariableTypeFieldName(name)) {
+    return inferredType || undefined;
+  }
+  if (isDefaultValueFieldName(name)) {
+    const inferredDefault = inferDefaultValueForType(inferredType);
+    if (inferredDefault !== undefined) return inferredDefault;
+  }
   if (semanticEdit && /(name|property|prop|key|field|selector)/.test(lower) && hasText(semanticEdit.field)) {
     return semanticEdit.field;
+  }
+  if (/(name|property|prop|key|field|selector)/.test(lower)) {
+    const fromIntent = Array.isArray(inferredNames) ? safeString(inferredNames[itemIndex]).trim() : "";
+    if (fromIntent) return fromIntent;
   }
   if (semanticEdit && /(newvalue|new_value|value|to|after|replacement)/.test(lower)) {
     return semanticEdit.newValue;
@@ -128,6 +241,7 @@ function validateAndNormalizeStructuredArrayItems({
     ? itemSchema.required.map((x) => safeString(x).trim()).filter(Boolean)
     : [];
   const itemProperties = isPlainObject(itemSchema?.properties) ? itemSchema.properties : {};
+  const inferredNamesFromIntent = extractNamedIdentifierListFromIntent(codeIntent);
   const normalized = [];
   const missingRequiredFields = new Set();
   const invalidTypeFields = new Set();
@@ -154,6 +268,8 @@ function validateAndNormalizeStructuredArrayItems({
         codeIntent,
         targetRef,
         itemSchema,
+        itemIndex: i,
+        inferredNames: inferredNamesFromIntent,
       });
       if (hasPresentValue(inferred)) {
         rawItem[req] = inferred;
@@ -226,18 +342,49 @@ function pushEdit(out, edit) {
     field,
     newValue: edit.newValue,
     oldValue: edit.oldValue,
+    valueType: safeString(edit.valueType).trim() || null,
   });
+}
+
+function extractVariableAddEditsFromIntent(text) {
+  const source = safeString(text).trim();
+  if (!source) return [];
+  const lower = source.toLowerCase();
+  if (!/\badd\b/.test(lower) || !/\bvariables?\b/.test(lower)) return [];
+  const names = extractNamedIdentifierListFromIntent(source);
+  if (names.length < 1) return [];
+  const valueType = inferPrimitiveValueTypeToken(source);
+  const defaultValue = inferDefaultValueForType(valueType);
+  return names.map((name) => ({
+    kind: "add_variable",
+    field: name,
+    valueType: valueType || null,
+    ...(defaultValue !== undefined ? { newValue: defaultValue } : {}),
+  }));
 }
 
 function deriveSemanticEdits({ args = null, semanticIntent = null, workflowState = null } = {}) {
   const out = [];
+  const seen = new Set();
+  const push = (edit) => {
+    if (!isPlainObject(edit)) return;
+    const key = [
+      safeString(edit.kind).trim().toLowerCase(),
+      safeString(edit.field).trim().toLowerCase(),
+      safeString(edit.valueType).trim().toLowerCase(),
+      String(edit.newValue),
+    ].join("::");
+    if (seen.has(key)) return;
+    seen.add(key);
+    pushEdit(out, edit);
+  };
   const a = isPlainObject(args) ? args : {};
   const ss = isPlainObject(workflowState?.semanticState) ? workflowState.semanticState : {};
   const intents = [];
   if (Array.isArray(a.targetedEdits)) intents.push(...a.targetedEdits);
   if (Array.isArray(ss?.targetedEdits)) intents.push(...ss.targetedEdits);
   if (Array.isArray(semanticIntent?.targetedEdits)) intents.push(...semanticIntent.targetedEdits);
-  for (const e of intents) pushEdit(out, e);
+  for (const e of intents) push(e);
 
   const objectContainers = ["modifications", "operations", "edits", "patches", "changes"];
   for (const k of objectContainers) {
@@ -246,8 +393,20 @@ function deriveSemanticEdits({ args = null, semanticIntent = null, workflowState
     for (const [field, value] of Object.entries(v)) {
       if (!hasText(field)) continue;
       if (!isSimpleScalar(value)) continue;
-      pushEdit(out, { kind: "set_value", field, newValue: value });
+      push({ kind: "set_value", field, newValue: value });
     }
+  }
+  const intentSources = [
+    a.contentIntent,
+    a.codeIntent,
+    ss?.contentIntent,
+    ss?.codeIntent,
+    semanticIntent?.contentIntent,
+    semanticIntent?.codeIntent,
+  ];
+  for (const source of intentSources) {
+    const edits = extractVariableAddEditsFromIntent(source);
+    for (const edit of edits) push(edit);
   }
   return out;
 }

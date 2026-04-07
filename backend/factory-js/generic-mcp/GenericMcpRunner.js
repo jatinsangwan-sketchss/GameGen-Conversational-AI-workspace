@@ -60,6 +60,33 @@ function isLikelyMarkerToken(value) {
   return v === "called" || v === "named" || v === "node" || v === "script" || v === "scene";
 }
 
+function looksLikeCodePayload(value) {
+  const text = safeString(value);
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (trimmed.includes("```")) return true;
+  if (/[{};]/.test(trimmed) && /[=()]/.test(trimmed)) return true;
+  if (/\n/.test(trimmed) && /(^|\n)\s*(extends|class_name|func|var|const|if|for|while|return|pass)\b/i.test(trimmed)) {
+    return true;
+  }
+  if (/\n/.test(trimmed) && /(^|\n)\s*(def|class|function|import|from)\b/i.test(trimmed)) {
+    return true;
+  }
+  return false;
+}
+
+function extractInlineProseContentCandidate(args = null) {
+  const a = isPlainObject(args) ? args : {};
+  const keys = ["content", "body", "source", "text", "code", "snippet"];
+  for (const key of keys) {
+    const value = safeString(a[key]).trim();
+    if (!value) continue;
+    if (looksLikeCodePayload(value)) continue;
+    return value;
+  }
+  return null;
+}
+
 function extractNamedEntityFromRequest(request) {
   const text = safeString(request);
   if (!text) return null;
@@ -272,7 +299,31 @@ export class GenericMcpRunner {
       await this._modules.fileIndex.build(activeProjectRoot);
     }
 
-    const baseSessionContext = isPlainObject(sessionContext) ? sessionContext : { projectRoot, sessionStatus };
+    const providedSessionContext = isPlainObject(sessionContext) ? sessionContext : {};
+    const connectedProjectPath = safeString(sessionStatus?.connectedProjectPath).trim() || null;
+    const contextProjectRoot =
+      safeString(providedSessionContext.projectRoot).trim() ||
+      safeString(projectRoot).trim() ||
+      connectedProjectPath ||
+      null;
+    const contextProjectPath =
+      safeString(providedSessionContext.projectPath).trim() ||
+      contextProjectRoot ||
+      connectedProjectPath ||
+      null;
+    const baseSessionContext = {
+      ...providedSessionContext,
+      projectRoot: contextProjectRoot,
+      projectPath: contextProjectPath,
+      connectedProjectPath:
+        safeString(providedSessionContext.connectedProjectPath).trim() ||
+        connectedProjectPath ||
+        null,
+      sessionStatus: {
+        ...(isPlainObject(providedSessionContext.sessionStatus) ? providedSessionContext.sessionStatus : {}),
+        ...(isPlainObject(sessionStatus) ? sessionStatus : {}),
+      },
+    };
     const workflowState = this._initWorkflowState({ userRequest: request, resumeNeedsInput });
     this._ensureCanonicalSemanticState(workflowState);
     let seedDecision = this._buildResumePlan(resumeNeedsInput, request);
@@ -492,8 +543,17 @@ export class GenericMcpRunner {
         plan: planForResolver,
         workflowState,
       });
+      const contentSeededPlanForResolver = this._promotePlannerProseToContentIntent({
+        plan: semSeededPlanForResolver,
+        workflowState,
+      });
+      await this._ensureGeneratedContentStage({
+        resolvedPlan: contentSeededPlanForResolver,
+        workflowState,
+        sessionContext: baseSessionContext,
+      });
       const legacyOneShot = decisionStatus === "ready";
-      const resolvedPlan = await argumentResolver.resolve(semSeededPlanForResolver, {
+      const resolvedPlan = await argumentResolver.resolve(contentSeededPlanForResolver, {
         sessionStatus,
         toolInventory,
         workflowState,
@@ -505,7 +565,7 @@ export class GenericMcpRunner {
         return this._buildNeedsInputResult({
           sessionStatus,
           inventory,
-          planningResult: semSeededPlanForResolver,
+          planningResult: contentSeededPlanForResolver,
           resolvedPlan,
           workflowState,
         });
@@ -532,7 +592,7 @@ export class GenericMcpRunner {
           presentation: "Stopped safely: repeated unproductive step detected.",
           workflowState,
           runtimeState: this._runtimeWithWorkflow({
-            planningResult: semSeededPlanForResolver,
+            planningResult: contentSeededPlanForResolver,
             resolvedPlan: gatedReadyPlan,
             inventory,
             workflowState,
@@ -550,7 +610,7 @@ export class GenericMcpRunner {
           reason: drift.reason,
           sessionStatus,
           inventorySummary: { toolCount: inventory.toolCount, fetchedAt: inventory.fetchedAt },
-          planningResult: semSeededPlanForResolver,
+          planningResult: contentSeededPlanForResolver,
           resolvedPlan: gatedReadyPlan,
           executionResult: null,
           presentation: drift.reason,
@@ -578,7 +638,7 @@ export class GenericMcpRunner {
           },
           workflowState,
           runtimeState: this._runtimeWithWorkflow({
-            planningResult: semSeededPlanForResolver,
+            planningResult: contentSeededPlanForResolver,
             resolvedPlan: gatedReadyPlan,
             inventory,
             workflowState,
@@ -603,7 +663,7 @@ export class GenericMcpRunner {
           presentation: liveInventoryValidation.error,
           workflowState,
           runtimeState: this._runtimeWithWorkflow({
-            planningResult: semSeededPlanForResolver,
+            planningResult: contentSeededPlanForResolver,
             resolvedPlan: gatedReadyPlan,
             inventory,
             workflowState,
@@ -664,7 +724,7 @@ export class GenericMcpRunner {
           presentation,
           workflowState,
           runtimeState: this._runtimeWithWorkflow({
-            planningResult: semSeededPlanForResolver,
+            planningResult: contentSeededPlanForResolver,
             resolvedPlan: gatedReadyPlan,
             inventory,
             workflowState,
@@ -692,7 +752,7 @@ export class GenericMcpRunner {
           presentation,
           workflowState,
           runtimeState: this._runtimeWithWorkflow({
-            planningResult: semSeededPlanForResolver,
+            planningResult: contentSeededPlanForResolver,
             resolvedPlan: gatedReadyPlan,
             inventory,
             workflowState,
@@ -1563,6 +1623,36 @@ export class GenericMcpRunner {
       return { name, args };
     });
     return { ...p, tools: patchedTools };
+  }
+
+  _promotePlannerProseToContentIntent({ plan, workflowState }) {
+    const p = isPlainObject(plan) ? plan : {};
+    if (safeString(p.status).trim() !== "ready") return p;
+    const tools = Array.isArray(p.tools) ? p.tools : [];
+    if (tools.length < 1) return p;
+    const firstTool = tools[0];
+    const toolName = safeString(firstTool?.name).trim().toLowerCase();
+    const rawArgs = isPlainObject(firstTool?.args) ? { ...firstTool.args } : {};
+    const hasIntent = Boolean(
+      safeString(rawArgs.contentIntent).trim() ||
+      safeString(rawArgs.codeIntent).trim() ||
+      safeString(workflowState?.semanticState?.contentIntent).trim() ||
+      safeString(workflowState?.semanticIntent?.contentIntent).trim() ||
+      safeString(workflowState?.semanticIntent?.codeIntent).trim()
+    );
+    if (hasIntent) return p;
+    const proseIntent = extractInlineProseContentCandidate(rawArgs);
+    if (!proseIntent) return p;
+    const scriptLikeTool = /(^|[_\-\s])(script|code|modify|create)([_\-\s]|$)/.test(toolName);
+    if (!scriptLikeTool) return p;
+    rawArgs.contentIntent = proseIntent;
+    if (!safeString(rawArgs.codeIntent).trim()) rawArgs.codeIntent = proseIntent;
+    if (isPlainObject(workflowState?.semanticState) && !safeString(workflowState.semanticState.contentIntent).trim()) {
+      workflowState.semanticState.contentIntent = proseIntent;
+    }
+    const nextTools = [...tools];
+    nextTools[0] = { ...firstTool, args: rawArgs };
+    return { ...p, tools: nextTools };
   }
 
   _compactArgsForHistory(args) {

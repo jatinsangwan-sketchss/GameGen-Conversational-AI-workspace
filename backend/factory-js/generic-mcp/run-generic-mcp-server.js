@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import dotenv from "dotenv";
 
 import { SessionManager } from "./SessionManager.js";
 import { ToolInventory } from "./ToolInventory.js";
@@ -48,7 +49,19 @@ function isMainModule() {
   return import.meta.url === pathToFileURL(path.resolve(entry)).href;
 }
 
+function loadEnvironmentVariables() {
+  // 1) Respect any env already injected by shell/process manager.
+  // 2) Load conventional .env from current working directory, if present.
+  dotenv.config();
+  // 3) Also load backend/.env (relative to this script) for sidecar runs
+  // started outside backend/ where cwd-based dotenv lookup may miss it.
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const backendEnvPath = path.resolve(here, "..", "..", ".env");
+  dotenv.config({ path: backendEnvPath });
+}
+
 export async function createGenericMcpSidecarRuntime({ argv = [], env = process.env } = {}) {
+  loadEnvironmentVariables();
   const config = buildGenericMcpServerConfig({ argv, env });
   const configLoader = new McpConfigLoader();
   const configResult = await configLoader.load({
@@ -62,7 +75,8 @@ export async function createGenericMcpSidecarRuntime({ argv = [], env = process.
 
   const mcpConfig = configResult.mcpConfig;
   const createClient = await loadCreateClient(config.clientModulePath);
-  const modelClient = new LiveModelClient(config.model);
+  const localModelClient = new LiveModelClient(config.model);
+  const onlineModelClient = new LiveModelClient(config.onlineModel);
 
   const sessionManager = new SessionManager({
     mcpConfig,
@@ -74,7 +88,8 @@ export async function createGenericMcpSidecarRuntime({ argv = [], env = process.
   const fileIndex = new ProjectFileIndex({ debug: config.debug });
   const resourceResolver = new ResourceResolver({ fileIndex, debug: config.debug });
   const nodeResolver = new NodeResolver({ sessionManager, inventory: toolInventory });
-  const toolPlanner = new ToolPlanner({ toolInventory, modelClient });
+  const localToolPlanner = new ToolPlanner({ toolInventory, modelClient: localModelClient });
+  const onlineToolPlanner = new ToolPlanner({ toolInventory, modelClient: onlineModelClient });
   const argumentResolver = new ArgumentResolver({
     sessionManager,
     fileResolver: resourceResolver,
@@ -90,23 +105,38 @@ export async function createGenericMcpSidecarRuntime({ argv = [], env = process.
   });
   const resultPresenter = new ResultPresenter({ debug: config.debug });
 
-  const runner = new GenericMcpRunner({
+  const localRunner = new GenericMcpRunner({
     sessionManager,
     toolInventory,
-    toolPlanner,
+    toolPlanner: localToolPlanner,
     argumentResolver,
     executor,
     resultPresenter,
     fileIndex,
     resourceResolver,
-    modelClient,
+    modelClient: localModelClient,
+    mcpConfig,
+    debug: config.debug,
+  });
+  const onlineRunner = new GenericMcpRunner({
+    sessionManager,
+    toolInventory,
+    toolPlanner: onlineToolPlanner,
+    argumentResolver,
+    executor,
+    resultPresenter,
+    fileIndex,
+    resourceResolver,
+    modelClient: onlineModelClient,
     mcpConfig,
     debug: config.debug,
   });
 
   const sessionStore = new GenericMcpSessionStore({ maxSessions: config.maxSessions });
   const adapter = new GenericMcpHttpAdapter({
-    runner,
+    runner: localRunner,
+    localRunner,
+    onlineRunner,
     sessionStore,
     sessionManager,
     mcpConfig,
@@ -157,7 +187,9 @@ export async function createGenericMcpSidecarRuntime({ argv = [], env = process.
     config,
     mcpConfig,
     sessionManager,
-    runner,
+    runner: localRunner,
+    localRunner,
+    onlineRunner,
     sessionStore,
     adapter,
     server,
