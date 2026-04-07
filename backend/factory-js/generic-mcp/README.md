@@ -36,11 +36,11 @@ Startup auto-init is enabled by default: sidecar immediately begins MCP initiali
 Routes:
 - `GET /health`
 - `GET /ready` (optional query: `?projectPath=/absolute/project/path`)
-- `POST /run`
+- `POST /run` (online OpenAI path, default model `gpt-4o`)
+- `POST /runlocal`
 - `POST /resume`
 
 Example payloads:
-
 `POST /run`
 ```json
 {
@@ -50,6 +50,19 @@ Example payloads:
   "responseMode": "compact (default) | full (optional)"
 }
 ```
+
+`POST /runlocal`
+```json
+{
+  "input": "create a gdscript called Logs and attach it to root node of NewScene.tscn. This script should print Hello world in the console",
+  "projectPath": "/absolute/project/path (optional)",
+  "sessionId": "optional",
+  "responseMode": "compact (default) | full (optional)"
+}
+```
+
+`POST /run` uses sidecar `onlineModel` config (`backend: openai`) and reads API key from environment variables such as `GENERIC_MCP_ONLINE_MODEL_API_KEY` or `OPENAI_API_KEY`. Sidecar startup loads dotenv (`.env` from cwd plus `backend/.env`) so key-only `.env` setups work when launching from workspace root.  
+`POST /runlocal` continues to use the existing local model config (`model` block / local backend).
 
 `POST /resume`
 ```json
