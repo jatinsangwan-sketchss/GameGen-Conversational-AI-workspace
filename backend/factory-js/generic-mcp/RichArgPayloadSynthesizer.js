@@ -14,6 +14,8 @@ function isPlainObject(value) {
 
 export { RICH_CONTAINER_KEYS };
 
+const DEBUG_VERIFY = safeString(process.env.DEBUG_GENERIC_MCP_VERIFY).trim().toLowerCase() === "true";
+
 function hasText(value) {
   return safeString(value).trim().length > 0;
 }
@@ -601,14 +603,16 @@ function buildGenericOperation({ toolName = null, richKey, codeIntent, generated
         itemSchema,
         fieldName: discriminator.field,
       });
-      console.log("[VERIFY][targeted-edit-mapping]", {
-        tool: safeString(toolName).trim() || null,
-        semanticEditKind: safeString(semanticEdit?.kind).trim() || "set_value",
-        mappedField: discriminator.field,
-        mappedType: mapped.value,
-        mappingSucceeded: Boolean(mapped.ok && hasText(mapped.value)),
-        mappingReason: mapped.reason,
-      });
+      if (DEBUG_VERIFY) {
+        console.log("[VERIFY][targeted-edit-mapping]", {
+          tool: safeString(toolName).trim() || null,
+          semanticEditKind: safeString(semanticEdit?.kind).trim() || "set_value",
+          mappedField: discriminator.field,
+          mappedType: mapped.value,
+          mappingSucceeded: Boolean(mapped.ok && hasText(mapped.value)),
+          mappingReason: mapped.reason,
+        });
+      }
       if (mapped.ok && hasText(mapped.value)) {
         op[discriminator.field] = mapped.value;
       }
@@ -748,17 +752,19 @@ export function ensureRichPayloadReadiness({
     args?.contentIntent ||
     args?.codeIntent
   ).trim() || null;
-  console.log("[VERIFY][payload-synthesis-input]", {
-    tool: safeString(toolName).trim() || null,
-    requiresStructuredPayload: requiredRichKeys.length > 0,
-    requiredStructuredKeys: requiredRichKeys,
-    targetRefs: semanticRefs,
-    creationIntent: semanticCreationIntent,
-    contentIntent: semanticContentIntent,
-    codeIntent: safeString(semanticIntent?.codeIntent || args?.codeIntent).trim() || null,
-    argKeys: Object.keys(baseArgs),
-    argsPreview: baseArgs,
-  });
+  if (DEBUG_VERIFY) {
+    console.log("[VERIFY][payload-synthesis-input]", {
+      tool: safeString(toolName).trim() || null,
+      requiresStructuredPayload: requiredRichKeys.length > 0,
+      requiredStructuredKeys: requiredRichKeys,
+      targetRefs: semanticRefs,
+      creationIntent: semanticCreationIntent,
+      contentIntent: semanticContentIntent,
+      codeIntent: safeString(semanticIntent?.codeIntent || args?.codeIntent).trim() || null,
+      argKeys: Object.keys(baseArgs),
+      argsPreview: baseArgs,
+    });
+  }
   if (requiredRichKeys.length < 1) {
     const out = {
       status: "not_applicable",
@@ -768,25 +774,28 @@ export function ensureRichPayloadReadiness({
       missingSemanticField: null,
       reason: null,
     };
-    console.log("[VERIFY][payload-synthesis-output]", {
-      tool: safeString(toolName).trim() || null,
-      synthesisRan: false,
-      synthesisStatus: out.status,
-      requiredStructuredKeys: out.requiredRichKeys,
-      missingStructuredKeys: out.missingRichKeys,
-      argKeys: Object.keys(out.args || {}),
-      hasModifications: Array.isArray(out.args?.modifications),
-      modificationsLength: Array.isArray(out.args?.modifications) ? out.args.modifications.length : null,
-      hasOperations: Array.isArray(out.args?.operations) || isPlainObject(out.args?.operations),
-      operationsLength: Array.isArray(out.args?.operations) ? out.args.operations.length : (isPlainObject(out.args?.operations) ? Object.keys(out.args.operations).length : null),
-      hasEdits: Array.isArray(out.args?.edits),
-      editsLength: Array.isArray(out.args?.edits) ? out.args.edits.length : null,
-      hasPatches: Array.isArray(out.args?.patches),
-      patchesLength: Array.isArray(out.args?.patches) ? out.args.patches.length : null,
-      hasChanges: Array.isArray(out.args?.changes),
-      changesLength: Array.isArray(out.args?.changes) ? out.args.changes.length : null,
-      missingSemanticField: out.missingSemanticField,
-    });
+    if (DEBUG_VERIFY) {
+      console.log("[VERIFY][payload-synthesis-output]", {
+        tool: safeString(toolName).trim() || null,
+        synthesisRan: false,
+        synthesisStatus: out.status,
+        requiredStructuredKeys: out.requiredRichKeys,
+        missingStructuredKeys: out.missingRichKeys,
+        argKeys: Object.keys(out.args || {}),
+        argsPreview: out.args,
+        hasModifications: Array.isArray(out.args?.modifications),
+        modificationsLength: Array.isArray(out.args?.modifications) ? out.args.modifications.length : null,
+        hasOperations: Array.isArray(out.args?.operations) || isPlainObject(out.args?.operations),
+        operationsLength: Array.isArray(out.args?.operations) ? out.args.operations.length : (isPlainObject(out.args?.operations) ? Object.keys(out.args.operations).length : null),
+        hasEdits: Array.isArray(out.args?.edits),
+        editsLength: Array.isArray(out.args?.edits) ? out.args.edits.length : null,
+        hasPatches: Array.isArray(out.args?.patches),
+        patchesLength: Array.isArray(out.args?.patches) ? out.args.patches.length : null,
+        hasChanges: Array.isArray(out.args?.changes),
+        changesLength: Array.isArray(out.args?.changes) ? out.args.changes.length : null,
+        missingSemanticField: out.missingSemanticField,
+      });
+    }
     return out;
   }
 
@@ -835,14 +844,16 @@ export function ensureRichPayloadReadiness({
     });
     normalizedArgs[key] = itemCheck.normalized;
     const firstItem = Array.isArray(itemCheck.normalized) && itemCheck.normalized.length > 0 ? itemCheck.normalized[0] : null;
-    console.log("[VERIFY][compiled-first-item]", {
-      tool: safeString(toolName).trim() || null,
-      structuredKey: key,
-      firstItem,
-      validation: itemCheck.firstItemValidation,
-      missingRequiredItemFields: itemCheck.missingRequiredFields,
-      invalidTypeItemFields: itemCheck.invalidTypeFields,
-    });
+    if (DEBUG_VERIFY) {
+      console.log("[VERIFY][compiled-first-item]", {
+        tool: safeString(toolName).trim() || null,
+        structuredKey: key,
+        firstItem,
+        validation: itemCheck.firstItemValidation,
+        missingRequiredItemFields: itemCheck.missingRequiredFields,
+        invalidTypeItemFields: itemCheck.invalidTypeFields,
+      });
+    }
     if (!itemCheck.ok) {
       itemLevelInvalid.push({
         key,
@@ -871,6 +882,39 @@ export function ensureRichPayloadReadiness({
         missingSemanticField: missingSemanticField || semanticField,
         reason: `Uncompilable structured edit payload for: ${itemLevelInvalid.map((x) => x.key).join(", ")}`,
       };
+      if (DEBUG_VERIFY) {
+        console.log("[VERIFY][payload-synthesis-output]", {
+          tool: safeString(toolName).trim() || null,
+          synthesisRan,
+          synthesisStatus: out.status,
+          requiredStructuredKeys: out.requiredRichKeys,
+          missingStructuredKeys: out.missingRichKeys,
+          argKeys: Object.keys(out.args || {}),
+          hasModifications: Array.isArray(out.args?.modifications),
+          modificationsLength: Array.isArray(out.args?.modifications) ? out.args.modifications.length : null,
+          hasOperations: Array.isArray(out.args?.operations) || isPlainObject(out.args?.operations),
+          operationsLength: Array.isArray(out.args?.operations) ? out.args.operations.length : (isPlainObject(out.args?.operations) ? Object.keys(out.args.operations).length : null),
+          hasEdits: Array.isArray(out.args?.edits),
+          editsLength: Array.isArray(out.args?.edits) ? out.args.edits.length : null,
+          hasPatches: Array.isArray(out.args?.patches),
+          patchesLength: Array.isArray(out.args?.patches) ? out.args.patches.length : null,
+          hasChanges: Array.isArray(out.args?.changes),
+          changesLength: Array.isArray(out.args?.changes) ? out.args.changes.length : null,
+          missingSemanticField: out.missingSemanticField,
+          reason: out.reason,
+        });
+      }
+      return out;
+    }
+    const out = {
+      status: "ready",
+      args: normalizedArgs,
+      requiredRichKeys,
+      missingRichKeys: [],
+      missingSemanticField: null,
+      reason: null,
+    };
+    if (DEBUG_VERIFY) {
       console.log("[VERIFY][payload-synthesis-output]", {
         tool: safeString(toolName).trim() || null,
         synthesisRan,
@@ -889,21 +933,23 @@ export function ensureRichPayloadReadiness({
         hasChanges: Array.isArray(out.args?.changes),
         changesLength: Array.isArray(out.args?.changes) ? out.args.changes.length : null,
         missingSemanticField: out.missingSemanticField,
-        reason: out.reason,
       });
-      return out;
     }
-    const out = {
-      status: "ready",
-      args: normalizedArgs,
-      requiredRichKeys,
-      missingRichKeys: [],
-      missingSemanticField: null,
-      reason: null,
-    };
+    return out;
+  }
+
+  const out = {
+    status: "not_ready",
+    args: normalizedArgs,
+    requiredRichKeys,
+    missingRichKeys: finalMissing,
+    missingSemanticField: missingSemanticField || "contentIntent",
+    reason: `Structured payload required but not ready: ${finalMissing.join(", ")}`,
+  };
+  if (DEBUG_VERIFY) {
     console.log("[VERIFY][payload-synthesis-output]", {
       tool: safeString(toolName).trim() || null,
-      synthesisRan,
+      synthesisRan: true,
       synthesisStatus: out.status,
       requiredStructuredKeys: out.requiredRichKeys,
       missingStructuredKeys: out.missingRichKeys,
@@ -919,37 +965,8 @@ export function ensureRichPayloadReadiness({
       hasChanges: Array.isArray(out.args?.changes),
       changesLength: Array.isArray(out.args?.changes) ? out.args.changes.length : null,
       missingSemanticField: out.missingSemanticField,
+      reason: out.reason,
     });
-    return out;
   }
-
-  const out = {
-    status: "not_ready",
-    args: normalizedArgs,
-    requiredRichKeys,
-    missingRichKeys: finalMissing,
-    missingSemanticField: missingSemanticField || "contentIntent",
-    reason: `Structured payload required but not ready: ${finalMissing.join(", ")}`,
-  };
-  console.log("[VERIFY][payload-synthesis-output]", {
-    tool: safeString(toolName).trim() || null,
-    synthesisRan: true,
-    synthesisStatus: out.status,
-    requiredStructuredKeys: out.requiredRichKeys,
-    missingStructuredKeys: out.missingRichKeys,
-    argKeys: Object.keys(out.args || {}),
-    hasModifications: Array.isArray(out.args?.modifications),
-    modificationsLength: Array.isArray(out.args?.modifications) ? out.args.modifications.length : null,
-    hasOperations: Array.isArray(out.args?.operations) || isPlainObject(out.args?.operations),
-    operationsLength: Array.isArray(out.args?.operations) ? out.args.operations.length : (isPlainObject(out.args?.operations) ? Object.keys(out.args.operations).length : null),
-    hasEdits: Array.isArray(out.args?.edits),
-    editsLength: Array.isArray(out.args?.edits) ? out.args.edits.length : null,
-    hasPatches: Array.isArray(out.args?.patches),
-    patchesLength: Array.isArray(out.args?.patches) ? out.args.patches.length : null,
-    hasChanges: Array.isArray(out.args?.changes),
-    changesLength: Array.isArray(out.args?.changes) ? out.args.changes.length : null,
-    missingSemanticField: out.missingSemanticField,
-    reason: out.reason,
-  });
   return out;
 }

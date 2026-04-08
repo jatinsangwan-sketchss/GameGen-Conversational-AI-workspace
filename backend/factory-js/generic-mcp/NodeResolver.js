@@ -7,6 +7,7 @@
  * - resource resolution picks scene file path
  * - node resolution maps refs to concrete node targets inside that scene
  */
+import { describeClientAvailability, getSessionClient } from "./utils/session-client.js";
 
 function safeString(v) {
   return v == null ? "" : String(v);
@@ -71,12 +72,13 @@ export class NodeResolver {
   }
 
   async _listSceneNodes(scenePath) {
-    const client =
-      (this._sessionManager && typeof this._sessionManager.getClient === "function" && this._sessionManager.getClient()) ||
-      this._sessionManager?.client ||
-      this._sessionManager?._client ||
-      null;
-    if (!client) return { ok: false, error: "No active MCP client." };
+    const client = getSessionClient(this._sessionManager);
+    if (!client) {
+      return {
+        ok: false,
+        error: `No active MCP client (${describeClientAvailability(this._sessionManager)}).`,
+      };
+    }
 
     const toolName = this._pickListSceneNodesToolName();
     if (!toolName) return { ok: false, error: "No list-scene-nodes tool in inventory." };
@@ -209,4 +211,3 @@ export class NodeResolver {
     return out;
   }
 }
-

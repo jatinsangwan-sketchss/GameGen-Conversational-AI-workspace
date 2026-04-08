@@ -1,5 +1,8 @@
 # factory-js (Reduced Prototype)
 
+Current runtime source of truth: `generic-mcp/`.
+Root-level generation/spec modules are legacy leftovers and are not part of the active runtime workflow.
+
 Node.js / JavaScript port of the AI Game Factory.
 
 This repo is intentionally reduced to a small, trustworthy prototype. The goal is to keep the edit-mode + GoPeak/MCP pipeline deterministic and easy to reason about, not to provide a general-purpose “raw MCP playground”.
@@ -72,4 +75,3 @@ curl -s http://127.0.0.1:4318/resume \
     "input":"res://NewScene.tscn"
   }'
 ```
-

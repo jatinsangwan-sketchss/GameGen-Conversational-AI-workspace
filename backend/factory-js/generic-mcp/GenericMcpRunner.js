@@ -171,6 +171,7 @@ export class GenericMcpRunner {
     maxSteps = 6,
     maxQueuedTasks = 12,
     allowContentFallback = true,
+    hooks = null,
     debug = false,
   } = {}) {
     this._provided = {
@@ -191,7 +192,10 @@ export class GenericMcpRunner {
       ? Math.max(1, Math.min(50, Math.floor(Number(maxQueuedTasks))))
       : 12;
     this._allowContentFallback = Boolean(allowContentFallback);
-    this._debug = Boolean(debug);
+    this._debug =
+      Boolean(debug) ||
+      safeString(process.env.DEBUG_GENERIC_MCP_VERIFY).trim().toLowerCase() === "true";
+    this._hooks = this._normalizeHooks(hooks);
 
     this._modules = {
       sessionManager: sessionManager ?? null,
@@ -205,6 +209,31 @@ export class GenericMcpRunner {
       nodeResolver: null,
       artifactRegistry: null,
     };
+  }
+
+  _normalizeHooks(hooks) {
+    const raw = isPlainObject(hooks) ? hooks : {};
+    const names = ["beforePlanning", "afterPlanning", "beforeExecution", "afterExecution"];
+    const out = {};
+    for (const name of names) {
+      out[name] = typeof raw[name] === "function" ? raw[name] : null;
+    }
+    return out;
+  }
+
+  async _invokeHook(name, payload = {}) {
+    const fn = this._hooks?.[name];
+    if (typeof fn !== "function") return;
+    try {
+      await fn(payload);
+    } catch (err) {
+      if (this._debug) {
+        console.error("[generic-mcp][runner][hook-error]", {
+          hook: safeString(name).trim() || null,
+          error: safeString(err?.message ?? err).trim() || "unknown hook failure",
+        });
+      }
+    }
   }
 
   async run({ userRequest, projectRoot = null, mcpConfig = null, sessionContext = null, resumeNeedsInput = null } = {}) {
@@ -238,6 +267,12 @@ export class GenericMcpRunner {
         resumeNeedsInput,
       });
     }
+    // console.log("[GenericMCPRunner] ", {userRequest: request,
+    //   projectRoot,
+    //   mcpConfig,
+    //   sessionContext,
+    //   queueState: initialQueue.queueState,
+    //   queueResumeState: resumedQueue,});
 
     return this._runTaskQueue({
       userRequest: request,
@@ -394,22 +429,40 @@ export class GenericMcpRunner {
           }),
         });
       }
+      const plannerSessionContext = {
+        ...baseSessionContext,
+        workflowState: {
+          ...this._compactWorkflowForPlanner(workflowState),
+          semanticIntent: isPlainObject(workflowState?.semanticIntent) ? workflowState.semanticIntent : {},
+          semanticState: isPlainObject(workflowState?.semanticState) ? workflowState.semanticState : {},
+          generatedArtifacts: Array.isArray(workflowState?.generatedArtifacts) ? workflowState.generatedArtifacts.slice(-3) : [],
+        },
+      };
+      await this._invokeHook("beforePlanning", {
+        userRequest: request,
+        stepIndex,
+        sessionStatus,
+        inventory,
+        workflowState,
+        sessionContext: plannerSessionContext,
+      });
       const planning =
         seedDecision ??
         (await toolPlanner.plan({
           userRequest: request,
-          sessionContext: {
-            ...baseSessionContext,
-            workflowState: {
-              ...this._compactWorkflowForPlanner(workflowState),
-              semanticIntent: isPlainObject(workflowState?.semanticIntent) ? workflowState.semanticIntent : {},
-              semanticState: isPlainObject(workflowState?.semanticState) ? workflowState.semanticState : {},
-              generatedArtifacts: Array.isArray(workflowState?.generatedArtifacts) ? workflowState.generatedArtifacts.slice(-3) : [],
-            },
-          },
+          sessionContext: plannerSessionContext,
         }));
       seedDecision = null;
       lastPlanning = planning;
+      await this._invokeHook("afterPlanning", {
+        userRequest: request,
+        stepIndex,
+        planningResult: planning,
+        sessionStatus,
+        inventory,
+        workflowState,
+        sessionContext: plannerSessionContext,
+      });
       const decisionStatus = safeString(planning?.status).trim();
 
       if (decisionStatus === "done") {
@@ -674,10 +727,29 @@ export class GenericMcpRunner {
       const artifactsBefore = Array.isArray(this._modules.artifactRegistry?.getAll?.())
         ? this._modules.artifactRegistry.getAll().length
         : 0;
+      await this._invokeHook("beforeExecution", {
+        userRequest: request,
+        stepIndex,
+        planningResult: planning,
+        resolvedPlan: gatedReadyPlan,
+        sessionStatus,
+        inventory,
+        workflowState,
+      });
       const executionResult = await executor.execute(gatedReadyPlan, {
         sessionStatus,
         inventory: toolInventory,
         artifactRegistry: this._modules.artifactRegistry,
+        workflowState,
+      });
+      await this._invokeHook("afterExecution", {
+        userRequest: request,
+        stepIndex,
+        planningResult: planning,
+        resolvedPlan: gatedReadyPlan,
+        executionResult,
+        sessionStatus,
+        inventory,
         workflowState,
       });
       const artifactsAfter = Array.isArray(this._modules.artifactRegistry?.getAll?.())
@@ -909,6 +981,21 @@ export class GenericMcpRunner {
     return lines.join("\n");
   }
 
+  _deriveQueueCarryoverWorkflow(completedTasks = []) {
+    const items = Array.isArray(completedTasks) ? completedTasks : [];
+    for (let i = items.length - 1; i >= 0; i -= 1) {
+      const entry = isPlainObject(items[i]) ? items[i] : null;
+      const workflow = isPlainObject(entry?.result?.workflow) ? entry.result.workflow : null;
+      if (workflow) return workflow;
+    }
+    return null;
+  }
+
+  _buildQueueCarryoverResumeState(completedTasks = []) {
+    const workflow = this._deriveQueueCarryoverWorkflow(completedTasks);
+    return workflow ? { workflow } : null;
+  }
+
   _latestArtifactByKind(kind) {
     const registry = this._modules?.artifactRegistry;
     if (!registry || typeof registry.getAll !== "function") return null;
@@ -1014,13 +1101,16 @@ export class GenericMcpRunner {
       if (!singleTaskResumeState) {
         singleTaskRequest = this._applyQueueCarryoverArtifacts(singleTaskRequest);
       }
+      const queueCarryoverResumeState = singleTaskResumeState
+        ? null
+        : this._buildQueueCarryoverResumeState(completedTasks);
 
       const taskResult = await this._runSingleTask({
         userRequest: singleTaskRequest,
         projectRoot,
         mcpConfig,
         sessionContext,
-        resumeNeedsInput: singleTaskResumeState,
+        resumeNeedsInput: singleTaskResumeState ?? queueCarryoverResumeState,
       });
       const status = safeString(taskResult?.status).trim();
       if (taskResult?.ok && status === "completed") {
@@ -1043,7 +1133,7 @@ export class GenericMcpRunner {
           ? safeString(taskResult?.question).trim() ||
             `Task ${taskIndex + 1} needs more input before queue execution can continue.`
           : `Task ${taskIndex + 1} failed and queue execution is paused. Reply with \"retry\" to retry this task, \"skip\" to skip it, or provide replacement task text.`;
-
+          
       return {
         ok: false,
         status: "paused",
@@ -1817,20 +1907,22 @@ export class GenericMcpRunner {
     if (!safeString(workflowState.semanticState.contentIntent).trim()) {
       workflowState.semanticState.contentIntent = safeString(generated.generatedContent.intent).trim() || null;
     }
-    console.log("[VERIFY][post-contentgen-state]", {
-      hasGeneratedContent: Boolean(safeString(workflowState?.semanticState?.generatedContent?.content).trim()),
-      hasGeneratedCode: Boolean(safeString(workflowState?.semanticState?.generatedCode).trim()),
-      hasCompiledPayload:
-        isPlainObject(workflowState?.semanticState?.compiledPayload) &&
-        Object.keys(workflowState.semanticState.compiledPayload).length > 0,
-      generatedContent: workflowState?.semanticState?.generatedContent ?? null,
-      generatedCode: workflowState?.semanticState?.generatedCode ?? null,
-      generatedPreview: safeString(
-        workflowState?.semanticState?.generatedContent?.content ||
-        workflowState?.semanticState?.generatedCode ||
-        ""
-      ).slice(0, 300),
-    });
+    if (this._debug) {
+      console.log("[VERIFY][post-contentgen-state]", {
+        hasGeneratedContent: Boolean(safeString(workflowState?.semanticState?.generatedContent?.content).trim()),
+        hasGeneratedCode: Boolean(safeString(workflowState?.semanticState?.generatedCode).trim()),
+        hasCompiledPayload:
+          isPlainObject(workflowState?.semanticState?.compiledPayload) &&
+          Object.keys(workflowState.semanticState.compiledPayload).length > 0,
+        generatedContent: workflowState?.semanticState?.generatedContent ?? null,
+        generatedCode: workflowState?.semanticState?.generatedCode ?? null,
+        generatedPreview: safeString(
+          workflowState?.semanticState?.generatedContent?.content ||
+          workflowState?.semanticState?.generatedCode ||
+          ""
+        ).slice(0, 300),
+      });
+    }
     return generated;
   }
 

@@ -12,10 +12,26 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { createLLMClient } from "./llm/client.js";
-import { loadSystemUserPrompts } from "./llm/prompt_builder.js";
-import { parseValidateWithOneRepair } from "./llm/structured_output.js";
-import { loadJsonSchema } from "./schema_utils.js";
+async function loadLegacySpecIngestDeps() {
+  try {
+    const [{ createLLMClient }, { loadSystemUserPrompts }, { parseValidateWithOneRepair }] =
+      await Promise.all([
+        import("./llm/client.js"),
+        import("./llm/prompt_builder.js"),
+        import("./llm/structured_output.js"),
+      ]);
+    return {
+      createLLMClient,
+      loadSystemUserPrompts,
+      parseValidateWithOneRepair,
+    };
+  } catch (err) {
+    throw new Error(
+      "spec_ingest is a legacy module and its LLM dependencies are not available in this reduced runtime. " +
+      `Missing dependency details: ${String(err?.message ?? err)}`
+    );
+  }
+}
 
 export const DEFAULT_SCHEMA_PATH = "factory-js/schemas/normalized_game_spec.schema.json";
 export const DEFAULT_MODEL_NAME = "gpt-oss-20b";
@@ -50,6 +66,8 @@ export async function ingestNormalizedSpec({
   userPromptPath = null,
   artifactsDir = null,
 }) {
+  const { createLLMClient, loadSystemUserPrompts, parseValidateWithOneRepair } =
+    await loadLegacySpecIngestDeps();
   const docs = readSourceDocuments({ prdPath, gddPath, uiSpecPath });
   const resolvedLLMClient =
     llmClient || (await createLLMClient(llmConfig || DEFAULT_LLM_CONFIG));
@@ -207,4 +225,3 @@ function combinePromptsForSingleMessage({ systemPrompt, userPrompt }) {
     userPrompt.trim()
   );
 }
-

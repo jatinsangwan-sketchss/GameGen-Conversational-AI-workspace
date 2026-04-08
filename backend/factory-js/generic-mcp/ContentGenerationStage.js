@@ -100,6 +100,8 @@ function parseGeneratedPayload(raw) {
   }
 }
 
+const DEBUG_VERIFY = safeString(process.env.DEBUG_GENERIC_MCP_VERIFY).trim().toLowerCase() === "true";
+
 export async function ensureGeneratedContentForStep({
   toolName,
   args = null,
@@ -127,13 +129,15 @@ export async function ensureGeneratedContentForStep({
       reason: null,
       generationContext,
     };
-    console.log("[VERIFY][contentgen-final]", {
-      status: out.status,
-      kind: null,
-      keys: [],
-      generatedContent: null,
-      preview: "",
-    });
+    if (DEBUG_VERIFY) {
+      console.log("[VERIFY][contentgen-final]", {
+        status: out.status,
+        kind: null,
+        keys: [],
+        generatedContent: null,
+        preview: "",
+      });
+    }
     return out;
   }
 
@@ -146,13 +150,15 @@ export async function ensureGeneratedContentForStep({
       missingSemanticField: safeString(targetReadiness?.missingSemanticField).trim() || null,
       generationContext,
     };
-    console.log("[VERIFY][contentgen-final]", {
-      status: out.status,
-      kind: null,
-      keys: [],
-      generatedContent: null,
-      preview: "",
-    });
+    if (DEBUG_VERIFY) {
+      console.log("[VERIFY][contentgen-final]", {
+        status: out.status,
+        kind: null,
+        keys: [],
+        generatedContent: null,
+        preview: "",
+      });
+    }
     return out;
   }
 
@@ -164,13 +170,15 @@ export async function ensureGeneratedContentForStep({
       reason: null,
       generationContext,
     };
-    console.log("[VERIFY][contentgen-final]", {
-      status: out.status,
-      kind: safeString(existing?.kind).trim() || null,
-      keys: isPlainObject(existing) ? Object.keys(existing) : [],
-      generatedContent: existing,
-      preview: safeString(existing?.content).slice(0, 300),
-    });
+    if (DEBUG_VERIFY) {
+      console.log("[VERIFY][contentgen-final]", {
+        status: out.status,
+        kind: safeString(existing?.kind).trim() || null,
+        keys: isPlainObject(existing) ? Object.keys(existing) : [],
+        generatedContent: existing,
+        preview: safeString(existing?.content).slice(0, 300),
+      });
+    }
     return out;
   }
 
@@ -179,7 +187,9 @@ export async function ensureGeneratedContentForStep({
   if (modelClient && typeof modelClient.generate === "function") {
     try {
       const res = await modelClient.generate({ prompt, responseFormat: "json_object" });
-      console.log("[VERIFY][contentgen-raw-output]", res ?? null);
+      if (DEBUG_VERIFY) {
+        console.log("[VERIFY][contentgen-raw-output]", res ?? null);
+      }
       const parsed = parseGeneratedPayload(res?.text ?? res);
       if (isPlainObject(parsed) && safeString(parsed.content).trim()) {
         generated = {
@@ -203,13 +213,15 @@ export async function ensureGeneratedContentForStep({
         generatedContent: null,
         reason: "content_generation_failed",
       };
-      console.log("[VERIFY][contentgen-final]", {
-        status: out.status,
-        kind: null,
-        keys: isPlainObject(existing) ? Object.keys(existing) : [],
-        generatedContent: null,
-        preview: "",
-      });
+      if (DEBUG_VERIFY) {
+        console.log("[VERIFY][contentgen-final]", {
+          status: out.status,
+          kind: null,
+          keys: isPlainObject(existing) ? Object.keys(existing) : [],
+          generatedContent: null,
+          preview: "",
+        });
+      }
       return out;
     }
     const fb = fallbackGenerateContent(contentIntent, { toolName, generationContext });
@@ -229,12 +241,14 @@ export async function ensureGeneratedContentForStep({
     reason: null,
     generationContext,
   };
-  console.log("[VERIFY][contentgen-final]", {
-    status: out.status,
-    kind: safeString(generated?.kind).trim() || null,
-    keys: isPlainObject(generated) ? Object.keys(generated) : [],
-    generatedContent: generated,
-    preview: safeString(generated?.content).slice(0, 300),
-  });
+  if (DEBUG_VERIFY) {
+    console.log("[VERIFY][contentgen-final]", {
+      status: out.status,
+      kind: safeString(generated?.kind).trim() || null,
+      keys: isPlainObject(generated) ? Object.keys(generated) : [],
+      generatedContent: generated,
+      preview: safeString(generated?.content).slice(0, 300),
+    });
+  }
   return out;
 }

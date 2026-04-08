@@ -25,6 +25,7 @@ import { defaultPathPolicyForArg } from "./PathPolicy.js";
 import { classifyToolArgs, isNodeRefSlot, semanticArgCandidates } from "./ArgRoleClassifier.js";
 import { mapGeneratedContentIntoInlineSink } from "./ContentSinkResolver.js";
 import { ensureRichPayloadReadiness } from "./RichArgPayloadSynthesizer.js";
+import { getSessionClient } from "./utils/session-client.js";
 
 function safeString(value) {
   return value == null ? "" : String(value);
@@ -113,7 +114,9 @@ export class ArgumentResolver {
     this._fileResolver = fileResolver;
     this._nodeResolver = nodeResolver;
     this._toolInventory = toolInventory;
-    this._debug = Boolean(debug);
+    this._debug =
+      Boolean(debug) ||
+      safeString(process.env.DEBUG_GENERIC_MCP_VERIFY).trim().toLowerCase() === "true";
   }
 
   _extractResolvedProjectPath(args) {
@@ -174,9 +177,6 @@ export class ArgumentResolver {
         reason: "No tools provided for argument resolution.",
       };
     }
-    // console.log("[ArgumentResolver] tools", tools);
-    // console.log("[ArgumentResolver] tools1", Array.isArray(input.tools));
-    // console.log("[ArgumentResolver] tools2", input.tools);
     
     const liveSessionStatus = sessionStatus ?? (await this._getSessionStatus());
     const liveInventory = toolInventory ?? this._toolInventory;
@@ -398,6 +398,7 @@ export class ArgumentResolver {
       const roleMeta = roleInfo.rolesByArg[key];
       const role = safeString(roleMeta?.role).trim();
       if (!["semantic_ref", "creation_intent_derived", "direct_user_value"].includes(role)) continue;
+      if (role === "creation_intent_derived") continue;
       const slot = safeString(roleMeta?.semanticSlot).trim() || key;
       const candidates = semanticArgCandidates(key, slot);
       const keyNorm = normalizeKey(key);
@@ -529,6 +530,15 @@ export class ArgumentResolver {
     const semanticCreation = isPlainObject(workflowState?.semanticState?.creationIntent)
       ? workflowState.semanticState.creationIntent
       : (isPlainObject(workflowState?.semanticIntent?.creationIntent) ? workflowState.semanticIntent.creationIntent : {});
+    // Preserve explicit concrete path targets when provided; synthesis should
+    // only fill missing create-script aliases, not override intentful paths.
+    for (const key of ["scriptPath", "scriptRef", "filePath", "fileRef", "artifactRef", "path"]) {
+      const raw = safeString(out?.[key]).trim();
+      if (!raw || isLikelyMarkerToken(raw)) continue;
+      if (!this._looksConcreteArtifactPath(raw)) continue;
+      const normalized = normalizeProjectRelativePath(raw);
+      if (normalized) return normalized;
+    }
     const requestedName =
       safeString(out.requestedName).trim() ||
       safeString(out.requested_name).trim() ||
@@ -1063,11 +1073,7 @@ export class ArgumentResolver {
     if (/^(scene_root|root node|root|\.)$/i.test(target)) {
       return { status: "resolved", value: ".", ambiguities: [] };
     }
-    const client =
-      (this._sessionManager && typeof this._sessionManager.getClient === "function" && this._sessionManager.getClient()) ||
-      this._sessionManager?.client ||
-      this._sessionManager?._client ||
-      null;
+    const client = getSessionClient(this._sessionManager);
     if (!client) return { status: "not_found", value: null, ambiguities: [] };
 
     const inv = this._toolInventory && typeof this._toolInventory.getInventory === "function"
@@ -1265,13 +1271,15 @@ export class ArgumentResolver {
       args: argsWithSink,
       inventory,
     });
-    console.log("[VERIFY][content-sink-selection]", {
-      tool: safeString(toolName).trim() || null,
-      selectedContentField: safeString(sink?.selectedContentField).trim() || null,
-      availableContentFields: Array.isArray(sink?.availableContentFields) ? sink.availableContentFields : [],
-      mapped: Boolean(sink?.mapped),
-      argKeys: Object.keys(normalizedModifyArgs),
-    });
+    if (this._debug) {
+      console.log("[VERIFY][content-sink-selection]", {
+        tool: safeString(toolName).trim() || null,
+        selectedContentField: safeString(sink?.selectedContentField).trim() || null,
+        availableContentFields: Array.isArray(sink?.availableContentFields) ? sink.availableContentFields : [],
+        mapped: Boolean(sink?.mapped),
+        args: normalizedModifyArgs,
+      });
+    }
     const readiness = ensureRichPayloadReadiness({
       toolName,
       args: normalizedModifyArgs,
@@ -1346,15 +1354,17 @@ export class ArgumentResolver {
       inventory,
       workflowState,
     });
-    console.log("[VERIFY][modify-target-resolution]", {
-      tool: safeString(toolName).trim() || null,
-      operationMode: safeString(workflowState?.artifactOperation?.mode).trim().toLowerCase() || null,
-      typedRefs: modifyGate.typedRefs ?? {},
-      typedPaths: modifyGate.typedPaths ?? {},
-      resolvedArtifactPath: modifyGate.resolvedArtifactPath ?? null,
-      resolutionStatus: modifyGate.resolutionStatus ?? "unknown",
-      canProceed: Boolean(modifyGate.canProceed),
-    });
+    if (this._debug) {
+      console.log("[VERIFY][modify-target-resolution]", {
+        tool: safeString(toolName).trim() || null,
+        operationMode: safeString(workflowState?.artifactOperation?.mode).trim().toLowerCase() || null,
+        typedRefs: modifyGate.typedRefs ?? {},
+        typedPaths: modifyGate.typedPaths ?? {},
+        resolvedArtifactPath: modifyGate.resolvedArtifactPath ?? null,
+        resolutionStatus: modifyGate.resolutionStatus ?? "unknown",
+        canProceed: Boolean(modifyGate.canProceed),
+      });
+    }
     if (!modifyGate.ok) {
       if (modifyGate.status === "missing_args") {
         return {
@@ -1938,6 +1948,9 @@ export class ArgumentResolver {
   }
 
   _normalizeStructuredModifyPayloadForContract({ toolName, args = {}, inventory = null } = {}) {
+    if (this._debug) {
+      console.log("[ArgumentResolver] args", args);
+    }
     const out = isPlainObject(args) ? { ...args } : {};
     const schema = this._getToolSchema(toolName, inventory);
     const modsSchema = isPlainObject(schema?.properties?.modifications) ? schema.properties.modifications : null;

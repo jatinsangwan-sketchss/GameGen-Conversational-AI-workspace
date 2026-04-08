@@ -15,6 +15,7 @@
  * - tool-specific behavior
  */
 import { buildPlannerCatalog } from "./PlannerCatalogBuilder.js";
+import { describeClientAvailability, getSessionClient } from "./utils/session-client.js";
 
 function safeString(value) {
   return value == null ? "" : String(value);
@@ -162,13 +163,13 @@ export class ToolInventory {
     }
 
     // Keep this generic: accept any session manager that can expose a client.
-    const client =
-      (typeof this._sessionManager.getClient === "function" && this._sessionManager.getClient()) ||
-      this._sessionManager.client ||
-      this._sessionManager._client ||
-      null;
+    const client = getSessionClient(this._sessionManager);
 
-    if (!client) throw new Error("No active MCP client available from SessionManager.");
+    if (!client) {
+      throw new Error(
+        `No active MCP client available from SessionManager (${describeClientAvailability(this._sessionManager)}).`
+      );
+    }
     return client;
   }
 
@@ -217,4 +218,3 @@ export class ToolInventory {
     throw new Error("Active MCP client does not support tools/list discovery methods.");
   }
 }
-

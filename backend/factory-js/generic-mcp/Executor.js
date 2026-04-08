@@ -19,6 +19,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { ArtifactRegistry } from "./ArtifactRegistry.js";
 import { coercePropertyLikeArgs } from "./PropertyValueCoercer.js";
+import { describeClientAvailability, getSessionClient } from "./utils/session-client.js";
 
 function safeString(value) {
   return value == null ? "" : String(value);
@@ -208,7 +209,7 @@ export class Executor {
     const inv = await this._resolveInventory(inventory);
     if (!inv.ok) return { ok: false, results: [], error: inv.error };
 
-    const client = await this._resolveClient(sessionStatus);
+    const client = await this._resolveClient(sessionStatus); 
     if (!client.ok) return { ok: false, results: [], error: client.error };
     const registry = artifactRegistry ?? this._artifactRegistry;
 
@@ -265,35 +266,41 @@ export class Executor {
     const verifyArgs = toArgs(args);
     const semanticState = isPlainObject(workflowState?.semanticState) ? workflowState.semanticState : {};
     const arrayLenOrNull = (v) => (Array.isArray(v) ? v.length : null);
-    console.log("[VERIFY][pre-executor]", {
-      tool: toolName,
-      argKeys: Object.keys(verifyArgs),
-      hasGeneratedContent: Boolean(safeString(semanticState?.generatedContent?.content).trim()),
-      hasGeneratedCode: Boolean(safeString(semanticState?.generatedCode).trim()),
-      hasCompiledPayload: isPlainObject(semanticState?.compiledPayload) && Object.keys(semanticState.compiledPayload).length > 0,
-      hasModifications: Array.isArray(verifyArgs.modifications),
-      modificationsLength: arrayLenOrNull(verifyArgs.modifications),
-      hasOperations: Array.isArray(verifyArgs.operations) || isPlainObject(verifyArgs.operations),
-      operationsLength: Array.isArray(verifyArgs.operations)
-        ? verifyArgs.operations.length
-        : (isPlainObject(verifyArgs.operations) ? Object.keys(verifyArgs.operations).length : null),
-      hasEdits: Array.isArray(verifyArgs.edits),
-      editsLength: arrayLenOrNull(verifyArgs.edits),
-      hasPatches: Array.isArray(verifyArgs.patches),
-      patchesLength: arrayLenOrNull(verifyArgs.patches),
-      hasChanges: Array.isArray(verifyArgs.changes),
-      changesLength: arrayLenOrNull(verifyArgs.changes),
-    });
+    if (this._debug) {
+      console.log("[VERIFY][pre-executor]", {
+        tool: toolName,
+        argKeys: Object.keys(verifyArgs),
+        argsPreview: verifyArgs,
+        hasGeneratedContent: Boolean(safeString(semanticState?.generatedContent?.content).trim()),
+        hasGeneratedCode: Boolean(safeString(semanticState?.generatedCode).trim()),
+        hasCompiledPayload: isPlainObject(semanticState?.compiledPayload) && Object.keys(semanticState.compiledPayload).length > 0,
+        hasModifications: Array.isArray(verifyArgs.modifications),
+        modificationsLength: arrayLenOrNull(verifyArgs.modifications),
+        hasOperations: Array.isArray(verifyArgs.operations) || isPlainObject(verifyArgs.operations),
+        operationsLength: Array.isArray(verifyArgs.operations)
+          ? verifyArgs.operations.length
+          : (isPlainObject(verifyArgs.operations) ? Object.keys(verifyArgs.operations).length : null),
+        hasEdits: Array.isArray(verifyArgs.edits),
+        editsLength: arrayLenOrNull(verifyArgs.edits),
+        hasPatches: Array.isArray(verifyArgs.patches),
+        patchesLength: arrayLenOrNull(verifyArgs.patches),
+        hasChanges: Array.isArray(verifyArgs.changes),
+        changesLength: arrayLenOrNull(verifyArgs.changes),
+      });
+    }
     if (this._debug) {
       // eslint-disable-next-line no-console
       console.log("[GenericMCP][Executor][DEBUG] payload", payload);
     }
 
     // eslint-disable-next-line no-console
-    console.log("[GenericMCP][Executor] execute", {
-      tool: toolName,
-      argKeys: Object.keys(toArgs(args)),
-    });
+    if (this._debug) {
+      console.log("[GenericMCP][Executor] execute", {
+        tool: toolName,
+        argKeys: Object.keys(toArgs(args)),
+        argsPreview: toArgs(args),
+      });
+    }
     // console.log("[Executor] payload ", payload);
 
     const rawResult = await this._callTool(client, { toolName, args: toArgs(args), payload });
@@ -353,13 +360,17 @@ export class Executor {
     }
     if (!ok) {
       // eslint-disable-next-line no-console
-      console.log("[GenericMCP][Executor] failed", {
-        tool: toolName,
-        error,
-      });
+      if (this._debug) {
+        console.log("[GenericMCP][Executor] failed", {
+          tool: toolName,
+          error,
+        });
+      }
     } else {
-      // eslint-disable-next-line no-console
-      console.log("[GenericMCP][Executor] success", { tool: toolName });
+      if (this._debug) {
+        // eslint-disable-next-line no-console
+        console.log("[GenericMCP][Executor] success", { tool: toolName });
+      }
       artifactRegistry?.registerFromExecution?.({ toolName, args: toArgs(args), rawResult });
       await this._updateProjectIndexAfterMutation({ toolName, args: toArgs(args), rawResult });
     }
@@ -425,17 +436,18 @@ export class Executor {
     } else if (typeof sm.initialize === "function") {
       await sm.initialize(sessionStatusArg?.desiredProjectRoot ?? null);
     }
-    const client =
-      (typeof sm.getClient === "function" && sm.getClient()) ||
-      sm.client ||
-      sm._client ||
-      null;
-    if (!client) return { ok: false, error: "No active MCP client available from SessionManager." };
+    const client = getSessionClient(sm);
+    if (!client) {
+      return {
+        ok: false,
+        error: `No active MCP client available from SessionManager (${describeClientAvailability(sm)}).`,
+      };
+    }
     return { ok: true, client };
   }
 
   async _callTool(client, { toolName, args, payload }) {
-    // console.log("[Executor] callTool", client.callTool, );
+    // console.log("[Executor] callTool", typeof client.callTool, typeof client.toolsCall, typeof client.request, client.callTool(toolName,args));
     if (typeof client.callTool === "function") {
       return client.callTool(toolName, args);
     }

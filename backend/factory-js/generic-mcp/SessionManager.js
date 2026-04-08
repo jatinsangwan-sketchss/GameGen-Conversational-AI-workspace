@@ -283,6 +283,10 @@ export class SessionManager {
     return { ...this._state };
   }
 
+  getClient() {
+    return this._client;
+  }
+
   async shutdown() {
     const client = this._client;
     this._client = null;

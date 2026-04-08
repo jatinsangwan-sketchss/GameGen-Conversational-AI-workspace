@@ -218,9 +218,13 @@ function compactSemanticSummaryForVerify(sessionContext) {
 }
 
 export class ToolPlanner {
-  constructor({ toolInventory, modelClient, promptPath = null, maxTools = 6, candidateLadder = null } = {}) {
+  constructor({ toolInventory, modelClient, promptPath = null, maxTools = 6, candidateLadder = null, debug = false } = {}) {
     this._toolInventory = toolInventory ?? null;
     this._modelClient = modelClient ?? null;
+    this._debug =
+      Boolean(debug) ||
+      Boolean(modelClient?._debug) ||
+      safeString(process.env.DEBUG_GENERIC_MCP_VERIFY).trim().toLowerCase() === "true";
     this._maxTools = clampToolCalls(maxTools, 1, 6);
     this._candidateLadder = Array.isArray(candidateLadder) && candidateLadder.length > 0
       ? candidateLadder
@@ -269,23 +273,27 @@ export class ToolPlanner {
         plannerCatalog: cat,
       });
       const semanticSummary = compactSemanticSummaryForVerify(promptContext.sessionContext);
-      console.log("[VERIFY][planner-input-summary]", {
-        userRequest: request,
-        hasContentIntent: Boolean(safeString(semanticSummary.contentIntent).trim()),
-        hasCodeIntent: Boolean(safeString(semanticSummary.codeIntent).trim()),
-        hasGeneratedContent: Boolean(semanticSummary.hasGeneratedContent),
-        hasGeneratedCode: Boolean(semanticSummary.hasGeneratedCode),
-        hasCompiledPayload: Boolean(semanticSummary.hasCompiledPayload),
-        generatedPreview: safeString(semanticSummary.generatedPreview).slice(0, 160),
-        semanticStateSummary: semanticSummary,
-        candidateTools: cat.map((x) => safeString(x?.name).trim()).filter(Boolean).slice(0, 30),
-      });
+      if (this._debug) {
+        console.log("[VERIFY][planner-input-summary]", {
+          userRequest: request,
+          hasContentIntent: Boolean(safeString(semanticSummary.contentIntent).trim()),
+          hasCodeIntent: Boolean(safeString(semanticSummary.codeIntent).trim()),
+          hasGeneratedContent: Boolean(semanticSummary.hasGeneratedContent),
+          hasGeneratedCode: Boolean(semanticSummary.hasGeneratedCode),
+          hasCompiledPayload: Boolean(semanticSummary.hasCompiledPayload),
+          generatedPreview: safeString(semanticSummary.generatedPreview).slice(0, 160),
+          semanticStateSummary: semanticSummary,
+          candidateTools: cat.map((x) => safeString(x?.name).trim()).filter(Boolean).slice(0, 30),
+        });
+      }
       const modelOutput = await this._runModel(promptContext.prompt);
       if (!modelOutput.ok) {
         lastError = modelOutput.error ?? "Planner model call failed.";
         continue;
       }
-      console.log("[VERIFY][planner-raw-output]", modelOutput.rawResponse ?? modelOutput.rawText ?? modelOutput.parsed ?? null);
+      if (this._debug) {
+        console.log("[VERIFY][planner-raw-output]", modelOutput.rawResponse ?? modelOutput.rawText ?? modelOutput.parsed ?? null);
+      }
       const validated = this.validatePlan(modelOutput.parsed, tools, {
         sessionContext: promptContext.sessionContext,
       });
@@ -295,25 +303,29 @@ export class ToolPlanner {
       }
       const enriched = this._enrichPlanWithExtractedRefs(validated.plan, tools, request);
       const cleaned = this._stripSessionInjectedArgsFromPlan(enriched, tools);
-      console.log("[VERIFY][planner-final-plan]", {
-        status: safeString(cleaned?.status).trim() || null,
-        tools: Array.isArray(cleaned?.tools)
-          ? cleaned.tools.map((t) => ({ name: safeString(t?.name).trim() || null, args: isPlainObject(t?.args) ? t.args : {} }))
-          : [],
-        step: isPlainObject(cleaned?.step)
-          ? {
+      if (this._debug) {
+        console.log("[VERIFY][planner-final-plan]", {
+          status: safeString(cleaned?.status).trim() || null,
+          tools: Array.isArray(cleaned?.tools)
+            ? cleaned.tools.map((t) => ({ name: safeString(t?.name).trim() || null, args: isPlainObject(t?.args) ? t.args : {} }))
+            : [],
+          step: isPlainObject(cleaned?.step)
+            ? {
               tool: safeString(cleaned.step.tool).trim() || null,
               args: isPlainObject(cleaned.step.args) ? cleaned.step.args : {},
               reason: safeString(cleaned.step.reason).trim() || null,
             }
-          : null,
-        missingArgs: Array.isArray(cleaned?.missingArgs) ? cleaned.missingArgs : [],
-        ambiguities: Array.isArray(cleaned?.ambiguities) ? cleaned.ambiguities : [],
-        reason: safeString(cleaned?.reason).trim() || null,
-      });
+            : null,
+          missingArgs: Array.isArray(cleaned?.missingArgs) ? cleaned.missingArgs : [],
+          ambiguities: Array.isArray(cleaned?.ambiguities) ? cleaned.ambiguities : [],
+          reason: safeString(cleaned?.reason).trim() || null,
+        });
+      }
+      
       const isFinalAttempt = i === attemptCatalogs.length - 1;
       const shouldEscalate = !isFinalAttempt && this._shouldEscalateAttempt(cleaned);
       if (shouldEscalate) continue;
+      // console.log("[ToolPlanner] ", cleaned);
       return cleaned;
     }
     return this._unsupported(lastError || "Planner could not produce a valid plan.");
@@ -350,7 +362,7 @@ export class ToolPlanner {
     if (!["ready", "missing_args", "next_step"].includes(base.status)) return base;
     const toolsByName = new Map((Array.isArray(tools) ? tools : []).map((t) => [safeString(t?.name).trim(), t]));
     const refHints = extractResourceRefHints(request);
-    if (this._modelClient?._debug && refHints.hints.length > 0) {
+    if (this._debug && refHints.hints.length > 0) {
       console.error("[generic-mcp][planner] extracted file refs", refHints.hints);
     }
     if (!Array.isArray(refHints.hints) || refHints.hints.length === 0) return base;

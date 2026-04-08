@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+
 function safeString(value) {
   return value == null ? "" : String(value);
 }
@@ -18,6 +21,22 @@ function asStringArray(value) {
 function normalizeRunMode(value) {
   const mode = normalizeInput(value).toLowerCase();
   return mode === "online" ? "online" : "local";
+}
+
+function canonicalPathForCompare(input) {
+  const v = normalizeInput(input);
+  if (!v) return null;
+  let resolved;
+  try {
+    resolved = path.isAbsolute(v) ? path.normalize(v) : path.resolve(process.cwd(), v);
+  } catch {
+    return null;
+  }
+  try {
+    return fs.realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
 }
 
 export class GenericMcpHttpAdapterError extends Error {
@@ -439,7 +458,14 @@ export class GenericMcpHttpAdapter {
     const connectedProjectPath = normalizeInput(status.connectedProjectPath) || null;
     const desiredProjectRoot = normalizeInput(status.desiredProjectRoot) || null;
     const expected = normalizeInput(expectedProjectPath) || desiredProjectRoot || null;
-    const projectMatches = expected == null ? true : connectedProjectPath != null && connectedProjectPath === expected;
+    const canonicalConnected = canonicalPathForCompare(connectedProjectPath);
+    const canonicalExpected = canonicalPathForCompare(expected);
+    const projectMatches =
+      expected == null
+        ? true
+        : canonicalConnected != null &&
+          canonicalExpected != null &&
+          canonicalConnected === canonicalExpected;
     const ready = Boolean(status.mcpClientReady) && Boolean(status.bridgeReady) && Boolean(projectMatches);
 
     return {
@@ -457,4 +483,3 @@ export class GenericMcpHttpAdapter {
     };
   }
 }
-

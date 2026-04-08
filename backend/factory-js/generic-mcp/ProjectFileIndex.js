@@ -63,7 +63,9 @@ export class ProjectFileIndex {
   }
 
   async build(projectRoot) {
-    console.log("[ProjectFileIndex] build intanceID", {instanceId:this._instanceId});
+    if (this._debug) {
+      console.log("[ProjectFileIndex] build intanceID", { instanceId: this._instanceId });
+    }
     this._projectRoot = path.resolve(String(projectRoot ?? "").trim() || ".");
     this._entries = [];
     this._byFilename.clear();
