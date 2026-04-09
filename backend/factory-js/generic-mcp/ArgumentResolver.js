@@ -225,7 +225,7 @@ export class ArgumentResolver {
         sessionInjectedKeys: withSession.injectedKeys,
         workflowState,
       });
-      // console.log("[argumentResolver] outside ", fileResolved);
+      // console.log("[AR] outside ", fileResolved);
       const nodeResolved = await this.resolveNodeRefs({
         toolName: name,
         args: fileResolved.args,
@@ -237,6 +237,8 @@ export class ArgumentResolver {
         args: nodeResolved.args,
         inventory: liveInventory,
       });
+
+      // console.log("[AR] args:",{args: nodeResolved.args,});      
 
       const compiled = await this.compileExecutableArgs({
         toolName: name,
@@ -458,6 +460,7 @@ export class ArgumentResolver {
       const val = out[key];
       if (val != null && safeString(val).trim() !== "") continue;
       if (!isCreatablePathArgName(key)) continue;
+      if (this._isNodeTargetKey(normalizeKey(key))) continue;
       const syn = synthesizeMissingCreationPath(key, out);
       if (syn.ok && syn.relativePath) {
         out[key] = syn.relativePath;
@@ -792,9 +795,10 @@ export class ArgumentResolver {
     const out = { ...(isPlainObject(args) ? args : {}) };
     const missingArgs = [];
     const ambiguities = [];
-    const notFoundRefs = [];
+    const notFoundByKey = new Map();
     const keys = Array.isArray(classification?.node_target_args) ? classification.node_target_args : [];
     const artifactValues = new Set();
+    const resolvedNodeByKey = new Map();
     for (const k of ["scriptRef", "fileRef", "resourceRef", "artifactRef", "scriptPath", "filePath", "resourcePath", "path"]) {
       const v = safeString(out[k]).trim();
       if (v) artifactValues.add(v);
@@ -823,8 +827,24 @@ export class ArgumentResolver {
         continue;
       }
       if (this._looksLikeFileResourceValue(rawText) || artifactValues.has(rawText)) {
-        notFoundRefs.push(`${key} (not_found: ${rawText})`);
-        continue;
+        const inferred = this._inferNodeTargetCandidate({
+          argKey: key,
+          args: out,
+          workflowState,
+        });
+        const inferredText = safeString(inferred).trim();
+        const canRecoverFromSemanticNodeRef = Boolean(
+          inferredText &&
+          inferredText !== rawText &&
+          !isLikelyMarkerToken(inferredText) &&
+          !this._looksLikeFileResourceValue(inferredText) &&
+          !artifactValues.has(inferredText)
+        );
+        if (!canRecoverFromSemanticNodeRef) {
+          notFoundByKey.set(key, `${key} (not_found: ${rawText})`);
+          continue;
+        }
+        rawText = inferredText;
       }
       const resolved = await this._resolveNodeRef({
         toolName,
@@ -834,15 +854,45 @@ export class ArgumentResolver {
       });
       if (resolved.status === "resolved") {
         out[key] = resolved.value;
+        resolvedNodeByKey.set(key, safeString(resolved.value).trim());
       } else if (resolved.status === "ambiguous") {
         ambiguities.push(...resolved.ambiguities);
       } else if (resolved.status === "not_found") {
-        notFoundRefs.push(`${key} (not_found: ${rawText})`);
+        notFoundByKey.set(key, `${key} (not_found: ${rawText})`);
       } else if (resolved.status === "missing") {
         missingArgs.push(key);
       }
     }
-    return { args: out, missingArgs, ambiguities, notFoundRefs };
+    // Node-target aliases are interchangeable semantic slots. If one alias is
+    // resolved, reuse it for unresolved siblings to avoid false not_found on the
+    // same target domain.
+    const canonicalResolvedNode =
+      resolvedNodeByKey.get("targetNode") ||
+      resolvedNodeByKey.get("targetNodePath") ||
+      resolvedNodeByKey.get("nodePath") ||
+      resolvedNodeByKey.get("targetNodeRef") ||
+      resolvedNodeByKey.get("nodeRef") ||
+      null;
+    if (canonicalResolvedNode) {
+      for (const key of keys) {
+        const current = safeString(out[key]).trim();
+        const shouldBackfill =
+          !current ||
+          isLikelyMarkerToken(current) ||
+          this._looksLikeFileResourceValue(current) ||
+          artifactValues.has(current) ||
+          notFoundByKey.has(key);
+        if (!shouldBackfill) continue;
+        out[key] = canonicalResolvedNode;
+        notFoundByKey.delete(key);
+      }
+    }
+    return {
+      args: out,
+      missingArgs,
+      ambiguities,
+      notFoundRefs: [...notFoundByKey.values()],
+    };
   }
 
   validateResolvedArgs({ toolName, args, inventory = null } = {}) {
@@ -1197,18 +1247,32 @@ export class ArgumentResolver {
   _matchNodeTarget(nodes, target) {
     const raw = safeString(target).trim();
     if (!raw) return { status: "not_found", value: null, ambiguities: [] };
-    const byPath = nodes.find((n) => n.path === raw);
-    if (byPath) return { status: "resolved", value: byPath.path, ambiguities: [] };
-    const exactNames = nodes.filter((n) => safeString(n.name).trim() === raw);
-    if (exactNames.length === 1) return { status: "resolved", value: exactNames[0].path, ambiguities: [] };
-    if (exactNames.length > 1) return { status: "ambiguous", value: null, ambiguities: [...new Set(exactNames.map((n) => n.path))] };
-    const lower = raw.toLowerCase();
-    const ci = nodes.filter((n) => safeString(n.name).trim().toLowerCase() === lower);
-    if (ci.length === 1) return { status: "resolved", value: ci[0].path, ambiguities: [] };
-    if (ci.length > 1) return { status: "ambiguous", value: null, ambiguities: [...new Set(ci.map((n) => n.path))] };
-    const suffix = nodes.filter((n) => safeString(n.path).toLowerCase().endsWith(lower) || safeString(n.path).split("/").some((seg) => seg.toLowerCase() === lower));
-    if (suffix.length === 1) return { status: "resolved", value: suffix[0].path, ambiguities: [] };
-    if (suffix.length > 1) return { status: "ambiguous", value: null, ambiguities: [...new Set(suffix.map((n) => n.path))] };
+    const attempt = (query) => {
+      const q = safeString(query).trim();
+      if (!q) return { status: "not_found", value: null, ambiguities: [] };
+      const byPath = nodes.find((n) => n.path === q);
+      if (byPath) return { status: "resolved", value: byPath.path, ambiguities: [] };
+      const exactNames = nodes.filter((n) => safeString(n.name).trim() === q);
+      if (exactNames.length === 1) return { status: "resolved", value: exactNames[0].path, ambiguities: [] };
+      if (exactNames.length > 1) return { status: "ambiguous", value: null, ambiguities: [...new Set(exactNames.map((n) => n.path))] };
+      const lower = q.toLowerCase();
+      const ci = nodes.filter((n) => safeString(n.name).trim().toLowerCase() === lower);
+      if (ci.length === 1) return { status: "resolved", value: ci[0].path, ambiguities: [] };
+      if (ci.length > 1) return { status: "ambiguous", value: null, ambiguities: [...new Set(ci.map((n) => n.path))] };
+      const suffix = nodes.filter((n) => safeString(n.path).toLowerCase().endsWith(lower) || safeString(n.path).split("/").some((seg) => seg.toLowerCase() === lower));
+      if (suffix.length === 1) return { status: "resolved", value: suffix[0].path, ambiguities: [] };
+      if (suffix.length > 1) return { status: "ambiguous", value: null, ambiguities: [...new Set(suffix.map((n) => n.path))] };
+      return { status: "not_found", value: null, ambiguities: [] };
+    };
+    const direct = attempt(raw);
+    if (direct.status !== "not_found") return direct;
+    if (raw.includes("/")) {
+      const segments = raw.split("/").map((s) => safeString(s).trim()).filter(Boolean);
+      for (let i = 1; i < segments.length; i += 1) {
+        const fallback = attempt(segments.slice(i).join("/"));
+        if (fallback.status !== "not_found") return fallback;
+      }
+    }
     return { status: "not_found", value: null, ambiguities: [] };
   }
 
@@ -1235,6 +1299,8 @@ export class ArgumentResolver {
       generatedContent: generated,
     });
     let bestFailure = null;
+
+    // console.log("[AR] args:",{args});
 
     for (const variant of variants) {
       const attempt = this._compileOneAttempt({
@@ -1428,9 +1494,14 @@ export class ArgumentResolver {
       args: contractValidatedArgs,
       inventory,
     });
+    const normalizedPropertyArgs = this._normalizePropertyPayloadAliases({
+      toolName,
+      args: collapsedInlineArgs,
+      inventory,
+    });
     return {
       status: "ready",
-      args: collapsedInlineArgs,
+      args: normalizedPropertyArgs,
       argMeta: inMeta,
       reason: null,
     };
@@ -1696,6 +1767,90 @@ export class ArgumentResolver {
       if (requiredSet.has(key)) continue;
       if (!hasNonEmpty(out[key])) continue;
       delete out[key];
+    }
+    return out;
+  }
+
+  _normalizePropertyPayloadAliases({ toolName, args = {}, inventory = null } = {}) {
+    const out = isPlainObject(args) ? { ...args } : {};
+    const schema = this._getToolSchema(toolName, inventory);
+    const props = isPlainObject(schema?.properties) ? schema.properties : {};
+    const keys = ["properties", "propertyMap", "props"].filter((k) =>
+      Object.prototype.hasOwnProperty.call(out, k) || Object.prototype.hasOwnProperty.call(props, k)
+    );
+    if (keys.length < 1) return out;
+
+    const required = Array.isArray(schema?.required)
+      ? schema.required.map((k) => safeString(k).trim()).filter(Boolean)
+      : [];
+    const requiredSet = new Set(required);
+    const schemaOrder = ["properties", "propertyMap", "props"];
+    const preferred =
+      keys.find((k) => requiredSet.has(k)) ||
+      schemaOrder.find((k) => Object.prototype.hasOwnProperty.call(props, k)) ||
+      keys[0];
+    if (!preferred) return out;
+
+    let payloadObj = null;
+    let payloadText = null;
+    for (const key of keys) {
+      const raw = out[key];
+      if (isPlainObject(raw)) {
+        payloadObj = this._normalizeTypedPropertyObjectsToPathEntries(raw);
+        break;
+      }
+      if (typeof raw === "string") {
+        const text = safeString(raw).trim();
+        if (!text) continue;
+        payloadText = payloadText ?? text;
+        try {
+          const parsed = JSON.parse(text);
+          if (isPlainObject(parsed)) {
+            payloadObj = this._normalizeTypedPropertyObjectsToPathEntries(parsed);
+            break;
+          }
+        } catch {
+          // keep as raw text fallback
+        }
+      }
+    }
+    if (!payloadObj && !payloadText) return out;
+
+    const preferredSchema = isPlainObject(props?.[preferred]) ? props[preferred] : {};
+    const preferredType = safeString(preferredSchema?.type).trim().toLowerCase();
+    if (preferredType === "string") {
+      out[preferred] = payloadText ?? JSON.stringify(payloadObj ?? {});
+    } else {
+      out[preferred] = payloadObj ?? payloadText;
+    }
+
+    for (const key of keys) {
+      if (key === preferred) continue;
+      if (requiredSet.has(key)) continue;
+      if (!Object.prototype.hasOwnProperty.call(out, key)) continue;
+      delete out[key];
+    }
+    return out;
+  }
+
+  _normalizeTypedPropertyObjectsToPathEntries(properties = {}) {
+    const input = isPlainObject(properties) ? properties : {};
+    const out = { ...input };
+    for (const [key, value] of Object.entries(input)) {
+      if (!isPlainObject(value)) continue;
+      const type = safeString(value.type).trim();
+      if (!type) continue;
+      const hasPath = hasNonEmpty(value.path) || hasNonEmpty(value.resourcePath) || hasNonEmpty(value.resource_path);
+      const isResourceLike = type.toLowerCase() === "resource" || hasPath;
+      if (isResourceLike) continue;
+      const entries = Object.entries(value).filter(([k]) => k !== "type");
+      if (entries.length < 1) continue;
+      out[key] = type;
+      for (const [subKey, subValue] of entries) {
+        const part = safeString(subKey).trim();
+        if (!part) continue;
+        out[`${key}/${part}`] = subValue;
+      }
     }
     return out;
   }

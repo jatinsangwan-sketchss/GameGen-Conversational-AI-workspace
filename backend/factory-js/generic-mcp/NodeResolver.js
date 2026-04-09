@@ -28,6 +28,39 @@ function unique(arr) {
 function isPlainObject(value) {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
+function matchNodeTarget(nodes, target) {
+  const raw = normalize(target);
+  if (!raw) return { status: "not_found", value: null, matches: [] };
+  const byPath = nodes.find((n) => n.path === raw);
+  if (byPath) return { status: "resolved", value: byPath.path, matches: [] };
+
+  const exactNames = nodes.filter((n) => n.name === raw);
+  if (exactNames.length === 1) return { status: "resolved", value: exactNames[0].path, matches: [] };
+  if (exactNames.length > 1) return { status: "ambiguous", matches: unique(exactNames.map((n) => n.path)) };
+
+  const lower = raw.toLowerCase();
+  const ciNames = nodes.filter((n) => n.name.toLowerCase() === lower);
+  if (ciNames.length === 1) return { status: "resolved", value: ciNames[0].path, matches: [] };
+  if (ciNames.length > 1) return { status: "ambiguous", matches: unique(ciNames.map((n) => n.path)) };
+
+  const suffixMatches = nodes.filter((n) => n.path.toLowerCase().endsWith(lower) || n.path.split("/").some((seg) => seg.toLowerCase() === lower));
+  if (suffixMatches.length === 1) return { status: "resolved", value: suffixMatches[0].path, matches: [] };
+  if (suffixMatches.length > 1) return { status: "ambiguous", matches: unique(suffixMatches.map((n) => n.path)) };
+  return { status: "not_found", value: null, matches: [] };
+}
+
+function nodeTargetFallbackVariants(target) {
+  const raw = normalize(target);
+  if (!raw || !raw.includes("/")) return [];
+  const segments = raw.split("/").map((s) => normalize(s)).filter(Boolean);
+  if (segments.length < 2) return [];
+  const variants = [];
+  for (let i = 1; i < segments.length; i += 1) {
+    variants.push(segments.slice(i).join("/"));
+  }
+  variants.push(segments[segments.length - 1]);
+  return unique(variants.filter((v) => v && v !== raw));
+}
 
 export class NodeResolver {
   constructor({ sessionManager, inventory } = {}) {
@@ -50,21 +83,13 @@ export class NodeResolver {
     }
 
     const nodes = nodesRes.nodes;
-    const byPath = nodes.find((n) => n.path === target);
-    if (byPath) return { status: "resolved", value: byPath.path, matches: [] };
+    const direct = matchNodeTarget(nodes, target);
+    if (direct.status !== "not_found") return direct;
 
-    const exactNames = nodes.filter((n) => n.name === target);
-    if (exactNames.length === 1) return { status: "resolved", value: exactNames[0].path, matches: [] };
-    if (exactNames.length > 1) return { status: "ambiguous", matches: unique(exactNames.map((n) => n.path)) };
-
-    const lower = target.toLowerCase();
-    const ciNames = nodes.filter((n) => n.name.toLowerCase() === lower);
-    if (ciNames.length === 1) return { status: "resolved", value: ciNames[0].path, matches: [] };
-    if (ciNames.length > 1) return { status: "ambiguous", matches: unique(ciNames.map((n) => n.path)) };
-
-    const suffixMatches = nodes.filter((n) => n.path.toLowerCase().endsWith(lower) || n.path.split("/").some((seg) => seg.toLowerCase() === lower));
-    if (suffixMatches.length === 1) return { status: "resolved", value: suffixMatches[0].path, matches: [] };
-    if (suffixMatches.length > 1) return { status: "ambiguous", matches: unique(suffixMatches.map((n) => n.path)) };
+    for (const variant of nodeTargetFallbackVariants(target)) {
+      const fallback = matchNodeTarget(nodes, variant);
+      if (fallback.status !== "not_found") return fallback;
+    }
 
     void toolName;
     void argKey;

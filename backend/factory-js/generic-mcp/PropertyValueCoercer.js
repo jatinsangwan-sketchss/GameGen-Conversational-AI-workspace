@@ -1,6 +1,55 @@
 function safeString(value) {
   return value == null ? "" : String(value);
 }
+function isFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function parseNumericMaybe(value) {
+  if (isFiniteNumber(value)) return value;
+  const text = safeString(value).trim();
+  if (!text) return null;
+  const num = Number(text);
+  return Number.isFinite(num) ? num : null;
+}
+
+function parseVectorLiteral(raw) {
+  const text = safeString(raw).trim();
+  const m = text.match(/^Vector([2-4])\s*\(([^)]*)\)$/i);
+  if (!m) return null;
+  const dim = Number(m[1]);
+  const parts = safeString(m[2]).split(",").map((p) => parseNumericMaybe(p.trim()));
+  if (parts.length !== dim || parts.some((p) => p == null)) return null;
+  const keys = ["x", "y", "z", "w"].slice(0, dim);
+  const out = { type: `Vector${dim}` };
+  for (let i = 0; i < keys.length; i += 1) {
+    out[keys[i]] = parts[i];
+  }
+  return out;
+}
+
+function normalizeVectorObject(value) {
+  if (!isPlainObject(value)) return null;
+  const keys = Object.keys(value);
+  const numericKeys = ["x", "y", "z", "w"].filter((k) => Object.prototype.hasOwnProperty.call(value, k));
+  if (numericKeys.length < 2 || numericKeys.length > 4) return null;
+  if (!numericKeys.every((k) => parseNumericMaybe(value[k]) != null)) return null;
+  const sorted = [...numericKeys].sort().join(",");
+  let dim = 0;
+  if (sorted === "x,y") dim = 2;
+  else if (sorted === "x,y,z") dim = 3;
+  else if (sorted === "w,x,y,z") dim = 4;
+  if (!dim) return null;
+  const out = {};
+  const extras = keys.filter((k) => !["x", "y", "z", "w", "type"].includes(k));
+  if (extras.length > 0) return null;
+  const type = safeString(value.type).trim();
+  out.type = type || `Vector${dim}`;
+  for (const k of ["x", "y", "z", "w"].slice(0, dim)) {
+    out[k] = parseNumericMaybe(value[k]);
+  }
+  return out;
+}
 
 function isPlainObject(value) {
   return value != null && typeof value === "object" && !Array.isArray(value);
@@ -81,6 +130,8 @@ function toTypedResource(pathRef) {
 }
 
 function coerceSingleValue({ propertyKey = "", value, args, artifactRegistry }) {
+  const normalizedVectorObject = normalizeVectorObject(value);
+  if (normalizedVectorObject) return normalizedVectorObject;
   if (hasResourceShape(value)) {
     const p = toGodotPath(value.path);
     if (!p) return value;
@@ -89,6 +140,8 @@ function coerceSingleValue({ propertyKey = "", value, args, artifactRegistry }) 
   if (typeof value !== "string") return value;
   const raw = safeString(value).trim();
   if (!raw) return value;
+  const vectorLiteral = parseVectorLiteral(raw);
+  if (vectorLiteral) return vectorLiteral;
 
   const fromArtifacts = artifactRegistry?.resolveRef?.(raw) ?? { status: "not_found" };
   if (fromArtifacts.status === "resolved" && fromArtifacts.artifact?.godotPath) {

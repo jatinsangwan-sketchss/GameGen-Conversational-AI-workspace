@@ -123,6 +123,111 @@ function markEffect(completedEffects, key, value) {
   completedEffects[key] = Boolean(value) || Boolean(completedEffects[key]);
 }
 
+function normalizeNodeToken(value) {
+  return safeString(value).trim().toLowerCase();
+}
+
+function toNodeLeaf(value) {
+  const raw = safeString(value).trim();
+  if (!raw) return "";
+  const parts = raw.split("/").map((x) => safeString(x).trim()).filter(Boolean);
+  return safeString(parts[parts.length - 1]).trim();
+}
+
+function extractObjectMaybe(raw) {
+  if (isPlainObject(raw)) return raw;
+  const text = safeString(raw).trim();
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return isPlainObject(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function collectAppliedPropertyKeys(args = {}) {
+  const out = new Set();
+  for (const key of ["propertyMap", "properties", "props"]) {
+    const obj = extractObjectMaybe(args[key]);
+    if (!isPlainObject(obj)) continue;
+    for (const k of Object.keys(obj)) {
+      const nk = safeString(k).trim();
+      if (nk) out.add(nk.toLowerCase());
+    }
+  }
+  const singularKey = safeString(args.property || args.propertyName || args.settingName).trim();
+  if (singularKey) out.add(singularKey.toLowerCase());
+  return out;
+}
+
+function executionStepSucceeded(executionResult) {
+  if (executionResult?.ok === true) return true;
+  const first = Array.isArray(executionResult?.results) ? executionResult.results[0] : null;
+  return Boolean(first?.ok);
+}
+
+function looksLikeNodePropertyMutationStep(stepToolName, args = {}) {
+  const tool = safeString(stepToolName).trim().toLowerCase();
+  const hasNodeTarget = Boolean(
+    safeString(args.nodePath).trim() ||
+    safeString(args.nodeRef).trim() ||
+    safeString(args.targetNodePath).trim() ||
+    safeString(args.targetNodeRef).trim() ||
+    safeString(args.targetNode).trim()
+  );
+  const hasPropertyPayload =
+    isPlainObject(extractObjectMaybe(args.propertyMap)) ||
+    isPlainObject(extractObjectMaybe(args.properties)) ||
+    isPlainObject(extractObjectMaybe(args.props)) ||
+    Boolean(safeString(args.property || args.propertyName || args.settingName).trim());
+  if (hasNodeTarget && hasPropertyPayload) return true;
+  return (
+    tool.includes("node") &&
+    tool.includes("propert") &&
+    (tool.includes("set") || tool.includes("update") || tool.includes("change") || tool.includes("edit"))
+  );
+}
+
+function consumeAppliedTargetedEdits({ targetedEdits = [], args = {}, stepToolName = "", executionResult = null } = {}) {
+  const edits = Array.isArray(targetedEdits) ? targetedEdits : [];
+  if (edits.length < 1) return edits;
+  if (!executionStepSucceeded(executionResult)) return edits;
+  if (!looksLikeNodePropertyMutationStep(stepToolName, args)) return edits;
+  const nodeCandidatesRaw = [
+    args.nodePath,
+    args.nodeRef,
+    args.targetNodePath,
+    args.targetNodeRef,
+    args.targetNode,
+  ]
+    .map((x) => safeString(x).trim())
+    .filter(Boolean);
+  if (nodeCandidatesRaw.length < 1) return edits;
+  const nodeCandidates = new Set(nodeCandidatesRaw.map((x) => normalizeNodeToken(x)));
+  const nodeLeafCandidates = new Set(nodeCandidatesRaw.map((x) => normalizeNodeToken(toNodeLeaf(x))).filter(Boolean));
+  const propertyKeys = collectAppliedPropertyKeys(args);
+  if (propertyKeys.size < 1) return edits;
+
+  return edits.filter((edit) => {
+    const field = safeString(edit?.field).trim();
+    if (!field || !field.includes(".")) return true;
+    const nodePart = safeString(field.split(".")[0]).trim();
+    const propPartRaw = safeString(field.slice(nodePart.length + 1)).trim();
+    const propPart = propPartRaw.toLowerCase();
+    const nodeNorm = normalizeNodeToken(nodePart);
+    const nodeLeafNorm = normalizeNodeToken(toNodeLeaf(nodePart));
+    const nodeMatches =
+      nodeCandidates.has(nodeNorm) ||
+      nodeLeafCandidates.has(nodeNorm) ||
+      nodeCandidates.has(nodeLeafNorm) ||
+      nodeLeafCandidates.has(nodeLeafNorm);
+    if (!nodeMatches) return true;
+    const propertyMatches = [...propertyKeys].some((k) => propPart === k || propPart.startsWith(`${k}.`));
+    return !propertyMatches;
+  });
+}
+
 export function updateSemanticStateFromStep({
   semanticState = null,
   resolvedArgs = null,
@@ -174,6 +279,14 @@ export function updateSemanticStateFromStep({
   else if (hasText(args.codeIntent)) ss.contentIntent = safeString(args.codeIntent).trim();
   if (Array.isArray(args.targetedEdits) && args.targetedEdits.length > 0) {
     ss.targetedEdits = [...args.targetedEdits];
+  }
+  if (Array.isArray(ss.targetedEdits) && ss.targetedEdits.length > 0) {
+    ss.targetedEdits = consumeAppliedTargetedEdits({
+      targetedEdits: ss.targetedEdits,
+      args,
+      stepToolName,
+      executionResult,
+    });
   }
 
   ss.knownFacts.lastTool = safeString(stepToolName).trim() || ss.knownFacts.lastTool || null;

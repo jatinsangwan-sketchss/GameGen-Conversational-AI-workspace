@@ -83,8 +83,27 @@ const KIND_TO_SPEC = {
 export function inferCreationPathSpec(normalizedKey, resourceKind) {
   const nk = safeString(normalizedKey).trim();
   const kind = resourceKind ? safeString(resourceKind).trim().toLowerCase() : null;
+  const isNodeOrProjectPathArg =
+    nk.includes("nodepath") ||
+    nk.includes("noderef") ||
+    nk.includes("targetnode") ||
+    nk.includes("parentpath") ||
+    nk.includes("parentnode") ||
+    nk.includes("projectpath") ||
+    nk.includes("projectroot") ||
+    nk.includes("projectref");
+  if (isNodeOrProjectPathArg) return null;
 
   if (kind && KIND_TO_SPEC[kind]) {
+    const canUseKindFallback =
+      nk === "path" ||
+      nk.includes("filepath") ||
+      nk.includes("artifactpath") ||
+      nk.includes("scriptpath") ||
+      nk.includes("resourcepath") ||
+      nk.includes("texturepath") ||
+      nk.includes("scenepath");
+    if (!canUseKindFallback) return null;
     return {
       ...KIND_TO_SPEC[kind],
       needsExplicitFolder: KIND_TO_SPEC[kind].defaultFolder == null,
@@ -214,5 +233,5 @@ export function isCreatablePathArgName(key) {
   const nk = normalizeArgKey(key);
   if (!nk) return false;
   if (nk.includes("projectpath") || nk.includes("projectroot")) return false;
-  return inferCreationPathSpec(nk, null) != null || inferCreationPathSpec(nk, "scene") != null;
+  return inferCreationPathSpec(nk, null) != null;
 }

@@ -32,7 +32,7 @@ import {
   checkOperationDrift,
   updateObservedEffects,
 } from "./ArtifactOperationModel.js";
-import { compactStepVerification } from "./PostconditionVerifier.js";
+import { compactStepVerification, verifyWorkflowPostconditions } from "./PostconditionVerifier.js";
 import { ensureGeneratedContentForStep } from "./ContentGenerationStage.js";
 import {
   buildSemanticWorkflowState,
@@ -633,6 +633,38 @@ export class GenericMcpRunner {
       const sig = this._stepSignature(gatedReadyPlan.tools?.[0]);
       const repeated = this._markAndCheckRepeat(workflowState, sig);
       if (repeated) {
+        const hasAnySuccessfulStep = allStepResults.some((stepResult) => Boolean(stepResult?.ok));
+        const postconditions = verifyWorkflowPostconditions({
+          operationState: workflowState?.artifactOperation,
+          workflowState,
+        });
+        if (hasAnySuccessfulStep && postconditions.ok) {
+          const executionResult = {
+            ok: true,
+            results: allStepResults,
+            error: null,
+            artifacts: this._modules.artifactRegistry?.getAll?.() ?? [],
+          };
+          const presentation = resultPresenter.present(executionResult);
+          return this._buildRunResult({
+            ok: true,
+            status: "completed",
+            reason: null,
+            sessionStatus,
+            inventorySummary: { toolCount: inventory.toolCount, fetchedAt: inventory.fetchedAt },
+            planningResult: planning,
+            resolvedPlan: gatedReadyPlan,
+            executionResult,
+            presentation,
+            workflowState,
+            runtimeState: this._runtimeWithWorkflow({
+              planningResult: contentSeededPlanForResolver,
+              resolvedPlan: gatedReadyPlan,
+              inventory,
+              workflowState,
+            }),
+          });
+        }
         return this._buildRunResult({
           ok: false,
           status: "failed",

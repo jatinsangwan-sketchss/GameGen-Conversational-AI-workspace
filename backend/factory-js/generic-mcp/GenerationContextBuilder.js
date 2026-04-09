@@ -31,6 +31,20 @@ function inferRuntimeHint({ refs = null, knownFacts = null } = {}) {
   return null;
 }
 
+function inferRuntimeVersionHint({ runtime = null, knownFacts = null, sessionContext = null } = {}) {
+  const explicit = firstText(
+    knownFacts?.runtimeVersion,
+    knownFacts?.engineVersion,
+    knownFacts?.version,
+    sessionContext?.runtimeVersion,
+    sessionContext?.engineVersion,
+    sessionContext?.sessionStatus?.serverVersion
+  );
+  if (explicit) return explicit;
+  if (safeString(runtime).trim().toLowerCase() === "godot") return "4.6";
+  return null;
+}
+
 function pickResolvedArtifactRef(targetRefs) {
   const refs = isPlainObject(targetRefs) ? targetRefs : {};
   return firstText(refs.artifactRef, refs.scriptRef, refs.fileRef, refs.resourceRef);
@@ -63,8 +77,10 @@ export function buildGenerationContext({
     resourceRef: firstText(refs.resourceRef, inputArgs.resourceRef),
     artifactRef: firstText(refs.artifactRef, inputArgs.artifactRef, refs.scriptRef, refs.fileRef, refs.resourceRef),
   };
+  const runtime = inferRuntimeHint({ refs: resolvedTargetRefs, knownFacts });
   return {
-    runtime: inferRuntimeHint({ refs: resolvedTargetRefs, knownFacts }),
+    runtime,
+    runtimeVersion: inferRuntimeVersionHint({ runtime, knownFacts, sessionContext }),
     toolName: safeString(toolName).trim() || null,
     artifactKind: firstText(creation.resourceKind, semanticIntent?.creationIntent?.resourceKind),
     operationMode: firstText(op.mode, semanticState.artifactIntent, "general"),

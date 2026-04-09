@@ -70,6 +70,17 @@ function inferTargetConcept(text) {
 function parseTypedLiteral(raw) {
   const t = safeString(raw).trim().replace(/^["'`]+|["'`]+$/g, "");
   if (!t) return null;
+  const vector = t.match(/^Vector([2-4])\s*\(([^)]*)\)$/i);
+  if (vector) {
+    const dim = Number(vector[1]);
+    const parts = safeString(vector[2]).split(",").map((x) => Number(safeString(x).trim()));
+    if (parts.length === dim && parts.every((n) => Number.isFinite(n))) {
+      const keys = ["x", "y", "z", "w"].slice(0, dim);
+      const out = { type: `Vector${dim}` };
+      for (let i = 0; i < keys.length; i += 1) out[keys[i]] = parts[i];
+      return out;
+    }
+  }
   if (/^-?\d+(?:\.\d+)?$/.test(t)) return Number(t);
   if (/^(true|false)$/i.test(t)) return /^true$/i.test(t);
   return t;
@@ -86,7 +97,7 @@ function inferTargetedEdits(text) {
     out.push(edit);
   };
 
-  const changeRe = /\b(?:change|update|set)\s+([A-Za-z0-9_.-]{2,})(?:\s+(?:value|property))?\s+(?:to|as)\s+([A-Za-z0-9_.:"'`-]+)(?:\s+from\s+([A-Za-z0-9_.:"'`-]+))?/gi;
+  const changeRe = /\b(?:change|update|set)\s+([A-Za-z0-9_.-]{2,})(?:\s+(?:value|property))?\s+(?:to|as)\s+(.+?)(?:\s+from\s+(.+?))?(?=(?:\s+\b(?:change|update|set)\b)|[.;!?]|$)/gi;
   for (const m of text.matchAll(changeRe)) {
     push({
       kind: "set_value",
@@ -118,6 +129,10 @@ function extractSemanticRefs(text) {
   const bareScriptByNamed = createVerb ? null : pickFirstRegex(text, /\bscript\s+named\s+([A-Za-z0-9_.-]{2,})\b/i);
   const bareScene = pickFirstRegex(text, /\bin\s+([A-Za-z0-9_-]{2,})(?:\s|,|\.|$)/i);
   const nodeTarget =
+    pickFirstRegex(text, /\b(?:under|inside|within|below)\s+(?:the\s+)?node\s+`([^`]+)`/i) ??
+    pickFirstRegex(text, /\b(?:under|inside|within|below)\s+(?:the\s+)?node\s+\"([^\"]+)\"/i) ??
+    pickFirstRegex(text, /\b(?:under|inside|within|below)\s+(?:the\s+)?node\s+'([^']+)'/i) ??
+    pickFirstRegex(text, /\b(?:under|inside|within|below)\s+(?:the\s+)?node\s+([A-Za-z0-9_-]{2,})\b/i) ??
     pickFirstRegex(text, /\b(?:to|on|at)\s+(?:the\s+)?`([^`]+)`\s+node\b/i) ??
     pickFirstRegex(text, /\b(?:to|on|at)\s+(?:the\s+)?"([^"]+)"\s+node\b/i) ??
     pickFirstRegex(text, /\b(?:to|on|at)\s+(?:the\s+)?'([^']+)'\s+node\b/i) ??

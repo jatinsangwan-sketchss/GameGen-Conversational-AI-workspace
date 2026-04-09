@@ -12,6 +12,26 @@ function normalizeIntentKey(intent) {
   return safeString(intent).trim().toLowerCase();
 }
 
+function isGodotScriptLikeContext({ toolName = "", generationContext = null } = {}) {
+  const toolLower = safeString(toolName).trim().toLowerCase();
+  const runtime = safeString(generationContext?.runtime).trim().toLowerCase();
+  const artifactKind = safeString(generationContext?.artifactKind).trim().toLowerCase();
+  return (
+    runtime === "godot" &&
+    (/script|gdscript|code|edit|modify|create|write|save/.test(toolLower) || artifactKind === "script")
+  );
+}
+
+function normalizeGodot4Syntax(content) {
+  let text = safeString(content);
+  if (!text.trim()) return text;
+  // Godot 3.x -> 4.x syntax normalization (generic language-level fixups).
+  text = text.replace(/(^|\n)\s*export\s+var\b/g, "$1@export var");
+  text = text.replace(/(^|\n)\s*onready\s+var\b/g, "$1@onready var");
+  text = text.replace(/\byield\s*\(/g, "await ");
+  return text;
+}
+
 function buildPrompt({ contentIntent, toolName, semanticState, args, generationContext }) {
   const targetRefs = isPlainObject(semanticState?.targetRefs) ? semanticState.targetRefs : {};
   const creationIntent = isPlainObject(semanticState?.creationIntent) ? semanticState.creationIntent : {};
@@ -20,6 +40,13 @@ function buildPrompt({ contentIntent, toolName, semanticState, args, generationC
     "Return JSON only with keys: kind, content, summary.",
     "kind should be one of: code_snippet, text_block, patch_notes.",
     "content must be actual implementation content, not intent labels.",
+    ...(safeString(generationContext?.runtime).trim().toLowerCase() === "godot"
+      ? [
+          `runtimeDialect: Godot ${safeString(generationContext?.runtimeVersion).trim() || "4.x"} GDScript`,
+          "When generating GDScript, use Godot 4.x syntax only.",
+          "Do not use Godot 3.x constructs (e.g. export var / onready var / yield()).",
+        ]
+      : []),
     `intent: ${safeString(contentIntent).trim()}`,
     `tool: ${safeString(toolName).trim()}`,
     `targetRefs: ${JSON.stringify(targetRefs)}`,
@@ -40,17 +67,21 @@ function fallbackGenerateContent(intent, { toolName = "", generationContext = nu
     artifactKind === "script" ||
     runtime === "godot";
   if (scriptLikeTool) {
-    return {
+    const generated = {
       kind: "code_snippet",
       content: [
         "extends Node",
         "",
         "func _ready():",
-        `  # TODO: ${t || "implement requested behavior"}`,
-        "  pass",
+        `\t# TODO: ${t || "implement requested behavior"}`,
+        "\tpass",
       ].join("\n"),
       summary: "Generated script scaffold from semantic intent fallback.",
     };
+    if (isGodotScriptLikeContext({ toolName, generationContext })) {
+      generated.content = normalizeGodot4Syntax(generated.content);
+    }
+    return generated;
   }
   if (lower.includes("print") && lower.includes("hello")) {
     return {
@@ -192,9 +223,13 @@ export async function ensureGeneratedContentForStep({
       }
       const parsed = parseGeneratedPayload(res?.text ?? res);
       if (isPlainObject(parsed) && safeString(parsed.content).trim()) {
+        let generatedContent = safeString(parsed.content);
+        if (isGodotScriptLikeContext({ toolName, generationContext })) {
+          generatedContent = normalizeGodot4Syntax(generatedContent);
+        }
         generated = {
           kind: safeString(parsed.kind).trim() || "text_block",
-          content: safeString(parsed.content),
+          content: generatedContent,
           summary: safeString(parsed.summary).trim() || null,
           intent: contentIntent,
           source: "model",
@@ -227,7 +262,7 @@ export async function ensureGeneratedContentForStep({
     const fb = fallbackGenerateContent(contentIntent, { toolName, generationContext });
     generated = {
       kind: fb.kind,
-      content: fb.content,
+      content: isGodotScriptLikeContext({ toolName, generationContext }) ? normalizeGodot4Syntax(fb.content) : fb.content,
       summary: fb.summary,
       intent: contentIntent,
       source: "fallback",
