@@ -2,11 +2,13 @@
   "name": "ai-ui-agent-backend",
   "version": "0.1.0",
   "type": "module",
+  "description": "JavaScript/Node.js port of the AI Game Factory (WIP)",
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js"
   },
   "dependencies": {
+    "ajv": "^8.17.1",
     "axios": "^1.13.5",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
