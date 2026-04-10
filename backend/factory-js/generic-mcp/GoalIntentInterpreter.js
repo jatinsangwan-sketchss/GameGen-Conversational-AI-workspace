@@ -86,35 +86,78 @@ function parseTypedLiteral(raw) {
   return t;
 }
 
+function decorateFieldWithNode(field, nodeName) {
+  const f = safeString(field).trim();
+  const n = safeString(nodeName).trim();
+  if (!f) return "";
+  if (!n) return f;
+  if (f.includes(".")) return f;
+  return `${n}.${f}`;
+}
+
+function extractNodeContext(text) {
+  return (
+    pickFirstRegex(text, /\bon\s+node\s+`([^`]+)`/i) ??
+    pickFirstRegex(text, /\bon\s+node\s+"([^"]+)"/i) ??
+    pickFirstRegex(text, /\bon\s+node\s+'([^']+)'/i) ??
+    pickFirstRegex(text, /\bon\s+node\s+([A-Za-z0-9_#./-]{2,})\b/i) ??
+    pickFirstRegex(text, /\bnode\s+`([^`]+)`/i) ??
+    pickFirstRegex(text, /\bnode\s+"([^"]+)"/i) ??
+    pickFirstRegex(text, /\bnode\s+'([^']+)'/i) ??
+    pickFirstRegex(text, /\bnode\s+([A-Za-z0-9_#./-]{2,})\b/i) ??
+    null
+  );
+}
+
 function inferTargetedEdits(text) {
   const out = [];
   const seen = new Set();
   const push = (edit) => {
     if (!edit || !edit.field) return;
-    const key = `${safeString(edit.field).toLowerCase()}::${String(edit.newValue)}`;
+    const key = `${safeString(edit.field).toLowerCase()}::${JSON.stringify(edit.newValue)}`;
     if (seen.has(key)) return;
     seen.add(key);
     out.push(edit);
   };
+  const segments = safeString(text)
+    .split(/[.;!?]\s+/)
+    .map((s) => safeString(s).trim())
+    .filter(Boolean);
+  for (const segment of segments) {
+    const nodeCtx = extractNodeContext(segment);
+    const changeRe = /\b(?:change|update|set)\s+([A-Za-z0-9_./-]{2,})(?:\s+(?:value|property))?\s+(?:to|as)\s+(.+?)(?:\s+from\s+(.+?))?(?=(?:\s+\b(?:change|update|set)\b)|(?:,\s*and\s+[A-Za-z0-9_./-]{2,}\s+to\b)|[.;!?]|$)/gi;
+    for (const m of segment.matchAll(changeRe)) {
+      push({
+        kind: "set_value",
+        field: decorateFieldWithNode(safeString(m[1]).trim(), nodeCtx),
+        newValue: parseTypedLiteral(m[2]),
+        oldValue: parseTypedLiteral(m[3]),
+      });
+    }
 
-  const changeRe = /\b(?:change|update|set)\s+([A-Za-z0-9_.-]{2,})(?:\s+(?:value|property))?\s+(?:to|as)\s+(.+?)(?:\s+from\s+(.+?))?(?=(?:\s+\b(?:change|update|set)\b)|[.;!?]|$)/gi;
-  for (const m of text.matchAll(changeRe)) {
-    push({
-      kind: "set_value",
-      field: safeString(m[1]).trim(),
-      newValue: parseTypedLiteral(m[2]),
-      oldValue: parseTypedLiteral(m[3]),
-    });
-  }
+    const fromToRe = /\b([A-Za-z0-9_./-]{2,})\s+from\s+([A-Za-z0-9_.:"'`-]+)\s+to\s+([A-Za-z0-9_.:"'`-]+)/gi;
+    for (const m of segment.matchAll(fromToRe)) {
+      push({
+        kind: "set_value",
+        field: decorateFieldWithNode(safeString(m[1]).trim(), nodeCtx),
+        newValue: parseTypedLiteral(m[3]),
+        oldValue: parseTypedLiteral(m[2]),
+      });
+    }
 
-  const fromToRe = /\b([A-Za-z0-9_.-]{2,})\s+from\s+([A-Za-z0-9_.:"'`-]+)\s+to\s+([A-Za-z0-9_.:"'`-]+)/gi;
-  for (const m of text.matchAll(fromToRe)) {
-    push({
-      kind: "set_value",
-      field: safeString(m[1]).trim(),
-      newValue: parseTypedLiteral(m[3]),
-      oldValue: parseTypedLiteral(m[2]),
-    });
+    // Support chained property assignments:
+    // "... set polygon to ..., and color to ..."
+    const chainRe = /(?:^|,\s*and\s+|\band\s+)([A-Za-z][A-Za-z0-9_./-]{1,})\s+to\s+(.+?)(?=(?:,\s*and\s+[A-Za-z][A-Za-z0-9_./-]{1,}\s+to\b)|[.;!?]|$)/gi;
+    for (const m of segment.matchAll(chainRe)) {
+      const field = safeString(m[1]).trim();
+      if (!field || /^(node|scene|script|called|named)$/i.test(field)) continue;
+      push({
+        kind: "set_value",
+        field: decorateFieldWithNode(field, nodeCtx),
+        newValue: parseTypedLiteral(m[2]),
+        oldValue: null,
+      });
+    }
   }
 
   return out;

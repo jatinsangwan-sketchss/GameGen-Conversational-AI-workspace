@@ -160,10 +160,12 @@ export function semanticArgCandidates(argName, semanticSlot) {
   if (lowerSlot === "targetnoderef") {
     out.add("targetNodeRef");
     out.add("nodeRef");
+    out.add("parentNodeRef");
   }
   if (lowerSlot === "parentnoderef") {
     out.add("parentNodeRef");
     out.add("nodeRef");
+    out.add("targetNodeRef");
   }
   if (lowerSlot === "fileref") out.add("fileRef");
   if (lowerSlot === "resourceref") out.add("resourceRef");

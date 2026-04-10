@@ -29,8 +29,23 @@ function hasModifySignal(text) {
   return /\b(modify|edit|update|change|patch|rewrite|write code|add code|implement)\b/i.test(text);
 }
 
+function hasSceneMutationSignal(text) {
+  const t = safeString(text);
+  if (!t.trim()) return false;
+  const hasMutationVerb = /\b(add|remove|delete|duplicate|reparent|set)\b/i.test(t);
+  const hasMutableTarget = /\b(node|property|scene|child|children|parent)\b/i.test(t);
+  return hasMutationVerb && hasMutableTarget;
+}
+
 function hasAttachSignal(text) {
-  return /\b(attach|assign|link|bind)\b/i.test(text) || /\buse\b[\s\S]{0,80}\b(on|to)\b/i.test(text);
+  const t = safeString(text);
+  if (!t.trim()) return false;
+  if (/\b(attach|assign|link|bind)\b/i.test(t)) return true;
+  // Keep this generic but avoid false attach detection from phrasing like:
+  // "Use set_node_properties on Node X ...".
+  // "use ... on/to ..." only counts as attach intent when artifact-like nouns
+  // are present in the same short span.
+  return /\buse\b[\s\S]{0,80}\b(script|resource|file|artifact)\b[\s\S]{0,80}\b(on|to|under)\b/i.test(t);
 }
 function looksLikeArtifactPath(ref) {
   const value = safeString(ref).trim();
@@ -56,11 +71,16 @@ export function buildArtifactOperationState({ semanticIntent = null } = {}) {
     goalType === "create" ||
     (hasCreateSignal(text) && goalType !== "modify") ||
     (hasText(intent?.creationIntent?.requestedName) && !existingTargetRef && goalType !== "modify");
-  const wantsModify = hasModifySignal(text) || hasText(intent?.contentIntent) || hasText(intent?.codeIntent) || hasText(intent?.behaviorIntent);
+  const wantsModify =
+    hasModifySignal(text) ||
+    hasSceneMutationSignal(text) ||
+    hasText(intent?.contentIntent) ||
+    hasText(intent?.codeIntent) ||
+    hasText(intent?.behaviorIntent);
   const wantsAttach =
     hasAttachSignal(text) ||
     (hasText(intent?.refs?.targetNodeRef) && hasText(existingTargetRef));
-  const createMode = wantsCreate && (!existingTargetRef || createTargetRefLikelyOutput);
+  const createMode = createArtifactIntent && wantsCreate && (!existingTargetRef || createTargetRefLikelyOutput);
   let mode = "general";
   if (createMode && wantsAttach && wantsModify) mode = "create_then_modify_then_attach";
   else if (createMode && wantsAttach) mode = "create_then_attach";
@@ -94,9 +114,19 @@ function classifyStepAction({ toolName, args }) {
   const a = isPlainObject(args) ? args : {};
   const hasRichPayload = ["modifications", "operations", "edits", "patches", "changes"].some((k) => Object.prototype.hasOwnProperty.call(a, k));
   const hasAttachTarget = ["targetNode", "targetNodeRef", "targetRef", "nodeRef", "targetNodePath", "nodePath", "parentPath"].some((k) => hasText(a[k]));
+  const hasSceneTarget = hasText(a.scenePath) || hasText(a.sceneRef);
+  const hasPropertyPayload =
+    isPlainObject(a.properties) ||
+    isPlainObject(a.propertyMap) ||
+    isPlainObject(a.props) ||
+    hasText(a.properties) ||
+    hasText(a.propertyMap) ||
+    hasText(a.props);
   const hasArtifactRef = ["artifactRef", "scriptRef", "scriptPath", "fileRef", "filePath", "resourceRef", "resourcePath", "path"].some((k) => hasText(a[k]));
   if (hasRichPayload) return "modify";
   if (/\b(create|new|generate|scaffold)\b/.test(t)) return "create";
+  if (/\b(add|remove|delete|duplicate|reparent|set)\b/.test(t) && (hasAttachTarget || hasSceneTarget || hasPropertyPayload)) return "modify";
+  if (/\bnode\b/.test(t) && /\b(add|delete|remove|duplicate|set|property)\b/.test(t)) return "modify";
   if (/\b(edit|modify|patch|update|change)\b/.test(t)) return "modify";
   if ((hasAttachTarget && /\b(attach|assign|link|use|set)\b/.test(t)) || (hasAttachTarget && hasArtifactRef)) return "attach";
   return "other";

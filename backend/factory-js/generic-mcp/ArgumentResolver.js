@@ -21,6 +21,9 @@ import {
   sanitizeFileStem,
   synthesizeMissingCreationPath,
 } from "./PathSynthesizer.js";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { defaultPathPolicyForArg } from "./PathPolicy.js";
 import { classifyToolArgs, isNodeRefSlot, semanticArgCandidates } from "./ArgRoleClassifier.js";
 import { mapGeneratedContentIntoInlineSink } from "./ContentSinkResolver.js";
@@ -117,6 +120,9 @@ export class ArgumentResolver {
     this._debug =
       Boolean(debug) ||
       safeString(process.env.DEBUG_GENERIC_MCP_VERIFY).trim().toLowerCase() === "true";
+    this._godotSchemaIndex = null;
+    this._godotPropertyTypeFallback = null;
+    this._godotSchemaLoaded = false;
   }
 
   _extractResolvedProjectPath(args) {
@@ -809,7 +815,10 @@ export class ArgumentResolver {
     const scenePath = this._extractResolvedScenePath(out, workflowState);
     // console.log("scenePath [ArgumentResolver]", scenePath);
     for (const key of keys) {
+      const roleMeta = isPlainObject(classification?.rolesByArg?.[key]) ? classification.rolesByArg[key] : null;
+      const enforceResolution = Boolean(roleMeta?.required);
       let rawText = safeString(out[key]).trim();
+      let inferredCandidateUsed = false;
       if (!rawText || isLikelyMarkerToken(rawText)) {
         const inferred = this._inferNodeTargetCandidate({
           argKey: key,
@@ -817,13 +826,14 @@ export class ArgumentResolver {
           workflowState,
         });
         if (!inferred) {
-          if (rawText) missingArgs.push(key);
+          if (enforceResolution && rawText) missingArgs.push(key);
           continue;
         }
         rawText = inferred;
+        inferredCandidateUsed = true;
       }
       if (isLikelyMarkerToken(rawText)) {
-        missingArgs.push(key);
+        if (enforceResolution) missingArgs.push(key);
         continue;
       }
       if (this._looksLikeFileResourceValue(rawText) || artifactValues.has(rawText)) {
@@ -841,10 +851,11 @@ export class ArgumentResolver {
           !artifactValues.has(inferredText)
         );
         if (!canRecoverFromSemanticNodeRef) {
-          notFoundByKey.set(key, `${key} (not_found: ${rawText})`);
+          if (enforceResolution) notFoundByKey.set(key, `${key} (not_found: ${rawText})`);
           continue;
         }
         rawText = inferredText;
+        inferredCandidateUsed = true;
       }
       const resolved = await this._resolveNodeRef({
         toolName,
@@ -855,12 +866,17 @@ export class ArgumentResolver {
       if (resolved.status === "resolved") {
         out[key] = resolved.value;
         resolvedNodeByKey.set(key, safeString(resolved.value).trim());
+        if (!safeString(out.nodeType).trim() && safeString(resolved.nodeType).trim()) {
+          out.nodeType = safeString(resolved.nodeType).trim();
+        }
       } else if (resolved.status === "ambiguous") {
-        ambiguities.push(...resolved.ambiguities);
+        if (enforceResolution || !inferredCandidateUsed) ambiguities.push(...resolved.ambiguities);
       } else if (resolved.status === "not_found") {
-        notFoundByKey.set(key, `${key} (not_found: ${rawText})`);
+        if (enforceResolution || !inferredCandidateUsed) {
+          notFoundByKey.set(key, `${key} (not_found: ${rawText})`);
+        }
       } else if (resolved.status === "missing") {
-        missingArgs.push(key);
+        if (enforceResolution) missingArgs.push(key);
       }
     }
     // Node-target aliases are interchangeable semantic slots. If one alias is
@@ -1111,9 +1127,18 @@ export class ArgumentResolver {
     if (this._nodeResolver && typeof this._nodeResolver.resolve === "function") {
       const res = await this._nodeResolver.resolve({ toolName, argKey, value, scenePath });
       const normalized = this._normalizeResolverResult(res, value, argKey);
+      if (normalized.status !== "not_found") return normalized;
+      // Generic fallback: retry via inventory-discovered scene-node listing
+      // candidate tools (broader than strict canonical resolver matching).
+      const invRetry = await this._resolveNodeRefViaInventory({
+        value: raw,
+        scenePath,
+      });
+      const normalizedRetry = this._normalizeResolverResult(invRetry, value, argKey);
+      if (normalizedRetry.status !== "not_found") return normalizedRetry;
       return normalized;
     }
-    return { status: "not_found", value: null, ambiguities: [] };
+    return this._resolveNodeRefViaInventory({ value: raw, scenePath });
   }
 
   async _resolveNodeRefViaInventory({ value, scenePath, projectPath = null } = {}) {
@@ -1251,16 +1276,37 @@ export class ArgumentResolver {
       const q = safeString(query).trim();
       if (!q) return { status: "not_found", value: null, ambiguities: [] };
       const byPath = nodes.find((n) => n.path === q);
-      if (byPath) return { status: "resolved", value: byPath.path, ambiguities: [] };
+      if (byPath) return { status: "resolved", value: byPath.path, nodeType: safeString(byPath.type).trim() || null, ambiguities: [] };
       const exactNames = nodes.filter((n) => safeString(n.name).trim() === q);
-      if (exactNames.length === 1) return { status: "resolved", value: exactNames[0].path, ambiguities: [] };
+      if (exactNames.length === 1) {
+        return {
+          status: "resolved",
+          value: exactNames[0].path,
+          nodeType: safeString(exactNames[0].type).trim() || null,
+          ambiguities: [],
+        };
+      }
       if (exactNames.length > 1) return { status: "ambiguous", value: null, ambiguities: [...new Set(exactNames.map((n) => n.path))] };
       const lower = q.toLowerCase();
       const ci = nodes.filter((n) => safeString(n.name).trim().toLowerCase() === lower);
-      if (ci.length === 1) return { status: "resolved", value: ci[0].path, ambiguities: [] };
+      if (ci.length === 1) {
+        return {
+          status: "resolved",
+          value: ci[0].path,
+          nodeType: safeString(ci[0].type).trim() || null,
+          ambiguities: [],
+        };
+      }
       if (ci.length > 1) return { status: "ambiguous", value: null, ambiguities: [...new Set(ci.map((n) => n.path))] };
       const suffix = nodes.filter((n) => safeString(n.path).toLowerCase().endsWith(lower) || safeString(n.path).split("/").some((seg) => seg.toLowerCase() === lower));
-      if (suffix.length === 1) return { status: "resolved", value: suffix[0].path, ambiguities: [] };
+      if (suffix.length === 1) {
+        return {
+          status: "resolved",
+          value: suffix[0].path,
+          nodeType: safeString(suffix[0].type).trim() || null,
+          ambiguities: [],
+        };
+      }
       if (suffix.length > 1) return { status: "ambiguous", value: null, ambiguities: [...new Set(suffix.map((n) => n.path))] };
       return { status: "not_found", value: null, ambiguities: [] };
     };
@@ -1337,6 +1383,15 @@ export class ArgumentResolver {
       args: argsWithSink,
       inventory,
     });
+    const tscnEditEnabled = this._isTscnEditEnabled(workflowState);
+    const tscnCompiledArgs = tscnEditEnabled
+      ? this._applyTscnEditCompileStrategy({
+          toolName,
+          args: normalizedModifyArgs,
+          inventory,
+          workflowState,
+        })
+      : normalizedModifyArgs;
     if (this._debug) {
       console.log("[VERIFY][content-sink-selection]", {
         tool: safeString(toolName).trim() || null,
@@ -1348,14 +1403,14 @@ export class ArgumentResolver {
     }
     const readiness = ensureRichPayloadReadiness({
       toolName,
-      args: normalizedModifyArgs,
+      args: tscnCompiledArgs,
       inventory,
       workflowState,
       semanticIntent: workflowState?.semanticIntent,
     });
     const contractValidatedArgs = this._normalizeStructuredModifyPayloadForContract({
       toolName,
-      args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
+      args: isPlainObject(readiness?.args) ? readiness.args : tscnCompiledArgs,
       inventory,
     });
     const modificationTypeValidation = this._validateRequestedModificationTypesAgainstContract({
@@ -1489,15 +1544,37 @@ export class ArgumentResolver {
         reason: attachGate.reason || null,
       };
     }
+    const semanticNodeGate = this._ensureSemanticNodeTargetApplied({
+      toolName,
+      args: contractValidatedArgs,
+      inventory,
+      workflowState,
+    });
+    if (!semanticNodeGate.ok) {
+      return {
+        status: safeString(semanticNodeGate.status).trim() || "not_found",
+        args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
+        argMeta: inMeta,
+        missingArgs: semanticNodeGate.status === "missing_args" ? [semanticNodeGate.field || "targetNodeRef"] : [],
+        reason: semanticNodeGate.reason || null,
+      };
+    }
     const collapsedInlineArgs = this._collapseInlineContentAliases({
       toolName,
       args: contractValidatedArgs,
       inventory,
     });
-    const normalizedPropertyArgs = this._normalizePropertyPayloadAliases({
+    const normalizedNodeTargetArgs = this._normalizeNodeTargetAliasesForExecution({
       toolName,
       args: collapsedInlineArgs,
       inventory,
+      workflowState,
+    });
+    const normalizedPropertyArgs = this._normalizePropertyPayloadAliases({
+      toolName,
+      args: normalizedNodeTargetArgs,
+      inventory,
+      workflowState,
     });
     return {
       status: "ready",
@@ -1596,6 +1673,94 @@ export class ArgumentResolver {
       });
     }
     return out;
+  }
+
+  _isRootNodeToken(value) {
+    const t = safeString(value).trim().toLowerCase();
+    return t === "." || t === "root" || t === "root node" || t === "scene_root";
+  }
+
+  _normalizeNodeTargetComparable(value) {
+    return safeString(value).trim().toLowerCase().replace(/^\.\/+/, "").replace(/^\/+/, "");
+  }
+
+  _matchesNodeTarget(resolvedValue, semanticValue) {
+    const resolved = this._normalizeNodeTargetComparable(resolvedValue);
+    const semantic = this._normalizeNodeTargetComparable(semanticValue);
+    if (!resolved || !semantic) return false;
+    if (resolved === semantic) return true;
+    if (resolved.endsWith(`/${semantic}`)) return true;
+    return false;
+  }
+
+  _looksLikeNodeMutationStep({ toolName = "", args = {}, inventory = null } = {}) {
+    const t = safeString(toolName).trim().toLowerCase();
+    const a = isPlainObject(args) ? args : {};
+    const hasScene = Boolean(safeString(a.scenePath).trim() || safeString(a.sceneRef).trim());
+    const hasNode = Boolean(
+      safeString(a.nodeRef).trim() ||
+      safeString(a.targetNodeRef).trim() ||
+      safeString(a.nodePath).trim() ||
+      safeString(a.targetNodePath).trim() ||
+      safeString(a.parentPath).trim()
+    );
+    if (/\b(add|remove|delete|duplicate|reparent|set)\b/.test(t) && (hasScene || hasNode)) return true;
+    const schema = this._getToolSchema(toolName, inventory);
+    const keys = [
+      ...(Array.isArray(schema?.required) ? schema.required : []),
+      ...(isPlainObject(schema?.properties) ? Object.keys(schema.properties) : []),
+    ].map((k) => normalizeKey(k));
+    const schemaHasSceneNode = keys.some((k) => k.includes("scene")) && keys.some((k) => k.includes("node"));
+    const schemaHasMutationLike = keys.some((k) => k.includes("property") || k.includes("parent") || k.includes("node"));
+    return schemaHasSceneNode && schemaHasMutationLike;
+  }
+
+  _ensureSemanticNodeTargetApplied({ toolName = "", args = {}, inventory = null, workflowState = null } = {}) {
+    if (!this._looksLikeNodeMutationStep({ toolName, args, inventory })) return { ok: true };
+    const a = isPlainObject(args) ? args : {};
+    const semStateRefs = isPlainObject(workflowState?.semanticState?.targetRefs) ? workflowState.semanticState.targetRefs : {};
+    const semIntentRefs = isPlainObject(workflowState?.semanticIntent?.refs) ? workflowState.semanticIntent.refs : {};
+    const semanticTarget =
+      safeString(semStateRefs.targetNodeRef).trim() ||
+      safeString(semStateRefs.nodeRef).trim() ||
+      safeString(semIntentRefs.targetNodeRef).trim() ||
+      safeString(semIntentRefs.nodeRef).trim() ||
+      safeString(a.targetNodeRef).trim() ||
+      safeString(a.parentNodeRef).trim() ||
+      null;
+    if (!semanticTarget || isLikelyMarkerToken(semanticTarget)) return { ok: true };
+    const resolvedTarget =
+      safeString(a.targetNodePath).trim() ||
+      safeString(a.targetNode).trim() ||
+      safeString(a.parentPath).trim() ||
+      safeString(a.nodePath).trim() ||
+      safeString(a.targetNodeRef).trim() ||
+      safeString(a.nodeRef).trim() ||
+      null;
+    if (!resolvedTarget) {
+      return {
+        ok: false,
+        status: "missing_args",
+        field: "targetNodeRef",
+        reason: "Missing resolved node target for requested node mutation.",
+      };
+    }
+    // Root path "." is a canonical node-path representation and can validly
+    // correspond to user-provided root node names (scene root aliases).
+    // We therefore avoid rejecting root-resolved targets solely because the
+    // semantic target text was non-root.
+    if (this._isRootNodeToken(resolvedTarget)) {
+      return { ok: true };
+    }
+    if (!this._matchesNodeTarget(resolvedTarget, semanticTarget)) {
+      return {
+        ok: false,
+        status: "not_found",
+        field: "targetNodeRef",
+        reason: `Referenced path(s) not found: targetNodeRef (not_found: ${semanticTarget})`,
+      };
+    }
+    return { ok: true };
   }
 
   _extractAttachArtifactAttemptedValue(args = {}) {
@@ -1771,7 +1936,7 @@ export class ArgumentResolver {
     return out;
   }
 
-  _normalizePropertyPayloadAliases({ toolName, args = {}, inventory = null } = {}) {
+  _normalizePropertyPayloadAliases({ toolName, args = {}, inventory = null, workflowState = null } = {}) {
     const out = isPlainObject(args) ? { ...args } : {};
     const schema = this._getToolSchema(toolName, inventory);
     const props = isPlainObject(schema?.properties) ? schema.properties : {};
@@ -1791,12 +1956,12 @@ export class ArgumentResolver {
       keys[0];
     if (!preferred) return out;
 
-    let payloadObj = null;
+    let payloadObjRaw = null;
     let payloadText = null;
     for (const key of keys) {
       const raw = out[key];
       if (isPlainObject(raw)) {
-        payloadObj = this._normalizeTypedPropertyObjectsToPathEntries(raw);
+        payloadObjRaw = { ...raw };
         break;
       }
       if (typeof raw === "string") {
@@ -1806,7 +1971,7 @@ export class ArgumentResolver {
         try {
           const parsed = JSON.parse(text);
           if (isPlainObject(parsed)) {
-            payloadObj = this._normalizeTypedPropertyObjectsToPathEntries(parsed);
+            payloadObjRaw = { ...parsed };
             break;
           }
         } catch {
@@ -1814,14 +1979,52 @@ export class ArgumentResolver {
         }
       }
     }
-    if (!payloadObj && !payloadText) return out;
+    if (!payloadObjRaw && !payloadText) return out;
 
     const preferredSchema = isPlainObject(props?.[preferred]) ? props[preferred] : {};
     const preferredType = safeString(preferredSchema?.type).trim().toLowerCase();
+    const tscnEditEnabled = this._isTscnEditEnabled(workflowState);
+    const payloadObjExpanded = payloadObjRaw
+      ? this._expandPropertyPathEntriesToTypedObjects(payloadObjRaw)
+      : null;
+    const payloadObjFlattened = payloadObjExpanded
+      ? this._normalizeTypedPropertyObjectsToPathEntries(payloadObjExpanded)
+      : null;
+    const prefersStringPayload = preferredType === "string";
+    const chosenObjectPayload =
+      prefersStringPayload && tscnEditEnabled
+        ? (payloadObjFlattened ?? payloadObjExpanded ?? payloadObjRaw)
+        : (payloadObjExpanded ?? payloadObjRaw ?? payloadObjFlattened);
     if (preferredType === "string") {
-      out[preferred] = payloadText ?? JSON.stringify(payloadObj ?? {});
+      if (tscnEditEnabled && chosenObjectPayload) {
+        out[preferred] = JSON.stringify(chosenObjectPayload);
+      } else {
+        out[preferred] = JSON.stringify(chosenObjectPayload ?? {});
+      }
     } else {
-      out[preferred] = payloadObj ?? payloadText;
+      out[preferred] = chosenObjectPayload ?? payloadText;
+    }
+    if (isPlainObject(out[preferred])) {
+      out[preferred] = this._applyGodotSchemaTypedPropertyPayload({
+        properties: out[preferred],
+        args: out,
+      });
+    } else if (typeof out[preferred] === "string") {
+      const text = safeString(out[preferred]).trim();
+      if (text) {
+        try {
+          const parsed = JSON.parse(text);
+          if (isPlainObject(parsed)) {
+            const typed = this._applyGodotSchemaTypedPropertyPayload({
+              properties: parsed,
+              args: out,
+            });
+            out[preferred] = JSON.stringify(typed);
+          }
+        } catch {
+          // keep raw string payload
+        }
+      }
     }
 
     for (const key of keys) {
@@ -1829,6 +2032,266 @@ export class ArgumentResolver {
       if (requiredSet.has(key)) continue;
       if (!Object.prototype.hasOwnProperty.call(out, key)) continue;
       delete out[key];
+    }
+    return out;
+  }
+
+  _ensureGodotSchemaLoaded() {
+    if (this._godotSchemaLoaded) return;
+    this._godotSchemaLoaded = true;
+    try {
+      const here = path.dirname(fileURLToPath(import.meta.url));
+      const schemaPath = path.join(here, "config", "godot_master_schema.json");
+      if (!fs.existsSync(schemaPath)) return;
+      const raw = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
+      if (!isPlainObject(raw)) return;
+      const classMap = new Map();
+      const fallbackMap = new Map();
+      for (const [className, items] of Object.entries(raw)) {
+        if (!Array.isArray(items)) continue;
+        const propMap = new Map();
+        for (const item of items) {
+          if (!isPlainObject(item)) continue;
+          const name = safeString(item.name).trim();
+          const typeId = Number(item.type);
+          if (!name || !Number.isFinite(typeId)) continue;
+          const key = name.toLowerCase();
+          propMap.set(key, {
+            name,
+            type: typeId,
+            hint: safeString(item.hint).trim() || null,
+          });
+          const typeSet = fallbackMap.get(key) || new Set();
+          typeSet.add(typeId);
+          fallbackMap.set(key, typeSet);
+        }
+        if (propMap.size > 0) classMap.set(safeString(className).trim(), propMap);
+      }
+      this._godotSchemaIndex = classMap;
+      this._godotPropertyTypeFallback = fallbackMap;
+    } catch {
+      this._godotSchemaIndex = null;
+      this._godotPropertyTypeFallback = null;
+    }
+  }
+
+  _lookupGodotPropertySpec({ nodeType = "", propertyName = "" } = {}) {
+    this._ensureGodotSchemaLoaded();
+    const prop = safeString(propertyName).trim().toLowerCase();
+    if (!prop) return null;
+    const cls = safeString(nodeType).trim();
+    if (cls && this._godotSchemaIndex instanceof Map) {
+      const byClass = this._godotSchemaIndex.get(cls);
+      if (byClass instanceof Map && byClass.has(prop)) return byClass.get(prop);
+    }
+    if (this._godotPropertyTypeFallback instanceof Map) {
+      const types = this._godotPropertyTypeFallback.get(prop);
+      if (types instanceof Set && types.size === 1) {
+        const only = [...types][0];
+        return { name: propertyName, type: only, hint: null };
+      }
+    }
+    return null;
+  }
+
+  _parseVectorLiteral(value, dim = 2) {
+    const text = safeString(value).trim();
+    const m = text.match(/^Vector([2-4])\s*\(([^)]*)\)$/i);
+    if (!m) return null;
+    const foundDim = Number(m[1]);
+    if (foundDim !== dim) return null;
+    const nums = safeString(m[2]).split(",").map((x) => Number(safeString(x).trim()));
+    if (nums.length !== dim || nums.some((n) => !Number.isFinite(n))) return null;
+    const keys = ["x", "y", "z", "w"].slice(0, dim);
+    const out = {};
+    for (let i = 0; i < keys.length; i += 1) out[keys[i]] = nums[i];
+    return out;
+  }
+
+  _coerceValueForGodotVariantType(typeId, value) {
+    const toNum = (v) => {
+      if (typeof v === "number" && Number.isFinite(v)) return v;
+      const n = Number(safeString(v).trim());
+      return Number.isFinite(n) ? n : null;
+    };
+    const toInt = (v) => {
+      const n = toNum(v);
+      return Number.isFinite(n) ? Math.trunc(n) : null;
+    };
+    const ensureVector = (v, dim = 2, integer = false) => {
+      if (isPlainObject(v)) {
+        const keys = ["x", "y", "z", "w"].slice(0, dim);
+        const out = {};
+        for (const key of keys) {
+          const n = integer ? toInt(v[key]) : toNum(v[key]);
+          if (n == null) return null;
+          out[key] = n;
+        }
+        return out;
+      }
+      if (typeof v === "string") {
+        const fromLiteral = this._parseVectorLiteral(v, dim);
+        if (fromLiteral) {
+          if (!integer) return fromLiteral;
+          const out = {};
+          for (const [k, n] of Object.entries(fromLiteral)) out[k] = Math.trunc(n);
+          return out;
+        }
+      }
+      return null;
+    };
+    switch (Number(typeId)) {
+      case 1: {
+        if (typeof value === "boolean") return value;
+        const t = safeString(value).trim().toLowerCase();
+        if (t === "true") return true;
+        if (t === "false") return false;
+        return null;
+      }
+      case 2: return toInt(value);
+      case 3: return toNum(value);
+      case 4: return safeString(value);
+      case 5: return ensureVector(value, 2, false);
+      case 6: return ensureVector(value, 2, true);
+      case 9: return ensureVector(value, 3, false);
+      case 10: return ensureVector(value, 3, true);
+      case 12: return ensureVector(value, 4, false);
+      case 13: return ensureVector(value, 4, true);
+      case 20: {
+        if (isPlainObject(value)) {
+          const out = {};
+          for (const key of ["r", "g", "b", "a"]) {
+            const n = toNum(value[key]);
+            if (n == null) return null;
+            out[key] = n;
+          }
+          return out;
+        }
+        return null;
+      }
+      case 22: // NodePath
+      case 24: // Object/Resource-like
+        return safeString(value).trim() || null;
+      case 27:
+        return isPlainObject(value) ? value : null;
+      case 28:
+        return Array.isArray(value) ? value : null;
+      default:
+        return value;
+    }
+  }
+
+  _applyGodotSchemaTypedPropertyPayload({ properties = {}, args = {} } = {}) {
+    const input = isPlainObject(properties) ? properties : {};
+    const nodeType =
+      safeString(args.nodeType).trim() ||
+      safeString(args.targetNodeType).trim() ||
+      "";
+    const out = {};
+    for (const [key, value] of Object.entries(input)) {
+      const propName = safeString(key).trim();
+      if (!propName) continue;
+      const root = propName.split("/")[0];
+      const spec = this._lookupGodotPropertySpec({ nodeType, propertyName: root });
+      if (!spec || !Number.isFinite(Number(spec.type))) {
+        out[propName] = value;
+        continue;
+      }
+      const coerced = this._coerceValueForGodotVariantType(spec.type, value);
+      const usable = coerced == null ? value : coerced;
+      out[propName] = {
+        type: Number(spec.type),
+        value: usable,
+      };
+    }
+    return out;
+  }
+
+  _isTscnEditEnabled(workflowState = null) {
+    return Boolean(
+      workflowState?.featureFlags?.tscnEdit?.enabled ||
+      workflowState?.semanticState?.knownFacts?.tscnEditEnabled
+    );
+  }
+
+  _looksLikeTscnEditCandidate({ toolName = "", args = {}, inventory = null } = {}) {
+    const a = isPlainObject(args) ? args : {};
+    const hasPropertyPayload =
+      isPlainObject(a.properties) ||
+      isPlainObject(a.propertyMap) ||
+      isPlainObject(a.props) ||
+      typeof a.properties === "string" ||
+      typeof a.propertyMap === "string" ||
+      typeof a.props === "string";
+    const hasSceneTarget = Boolean(safeString(a.sceneRef).trim() || safeString(a.scenePath).trim());
+    const hasNodeTarget = Boolean(
+      safeString(a.nodeRef).trim() ||
+      safeString(a.targetNodeRef).trim() ||
+      safeString(a.nodePath).trim() ||
+      safeString(a.targetNodePath).trim()
+    );
+    if (hasPropertyPayload && (hasSceneTarget || hasNodeTarget)) return true;
+    const schema = this._getToolSchema(toolName, inventory);
+    const props = isPlainObject(schema?.properties) ? Object.keys(schema.properties).map((k) => normalizeKey(k)) : [];
+    const schemaLooksSceneProperty =
+      props.some((k) => k.includes("scene")) &&
+      props.some((k) => k.includes("node")) &&
+      props.some((k) => k.includes("properties") || k.includes("propertymap") || k.includes("props"));
+    return schemaLooksSceneProperty;
+  }
+
+  _applyTscnEditCompileStrategy({ toolName = "", args = {}, inventory = null, workflowState = null } = {}) {
+    const out = isPlainObject(args) ? { ...args } : {};
+    if (!this._isTscnEditEnabled(workflowState)) return out;
+    if (!this._looksLikeTscnEditCandidate({ toolName, args: out, inventory })) return out;
+    const normalized = this._normalizePropertyPayloadAliases({
+      toolName,
+      args: out,
+      inventory,
+      workflowState,
+    });
+    if (!isPlainObject(workflowState?.semanticState)) return normalized;
+    workflowState.semanticState.knownFacts = isPlainObject(workflowState.semanticState.knownFacts)
+      ? workflowState.semanticState.knownFacts
+      : {};
+    workflowState.semanticState.knownFacts.tscnEditCompileApplied = true;
+    return normalized;
+  }
+
+  _normalizeNodeTargetAliasesForExecution({ toolName = "", args = {}, inventory = null, workflowState = null } = {}) {
+    const out = isPlainObject(args) ? { ...args } : {};
+    const schema = this._getToolSchema(toolName, inventory);
+    const schemaKeys = [
+      ...(Array.isArray(schema?.required) ? schema.required : []),
+      ...(isPlainObject(schema?.properties) ? Object.keys(schema.properties) : []),
+      ...Object.keys(out),
+    ];
+    const uniqueKeys = [...new Set(schemaKeys.map((k) => safeString(k).trim()).filter(Boolean))];
+    const nodeKeys = uniqueKeys.filter((k) => this._isNodeTargetKey(normalizeKey(k)));
+    if (nodeKeys.length < 1) return out;
+
+    const semStateRefs = isPlainObject(workflowState?.semanticState?.targetRefs) ? workflowState.semanticState.targetRefs : {};
+    const semIntentRefs = isPlainObject(workflowState?.semanticIntent?.refs) ? workflowState.semanticIntent.refs : {};
+    const resolvedNodeTarget = [
+      out.targetNodePath,
+      out.nodePath,
+      out.parentPath,
+      out.targetNode,
+      out.targetNodeRef,
+      out.nodeRef,
+      semStateRefs.targetNodeRef,
+      semStateRefs.nodeRef,
+      semIntentRefs.targetNodeRef,
+      semIntentRefs.nodeRef,
+    ]
+      .map((v) => safeString(v).trim())
+      .find((v) => v && !isLikelyMarkerToken(v) && !this._looksLikeFileResourceValue(v));
+    if (!resolvedNodeTarget) return out;
+
+    for (const key of nodeKeys) {
+      const current = safeString(out[key]).trim();
+      if (current && !isLikelyMarkerToken(current) && !this._looksLikeFileResourceValue(current)) continue;
+      out[key] = resolvedNodeTarget;
     }
     return out;
   }
@@ -1850,6 +2313,48 @@ export class ArgumentResolver {
         const part = safeString(subKey).trim();
         if (!part) continue;
         out[`${key}/${part}`] = subValue;
+      }
+    }
+    return out;
+  }
+
+  _expandPropertyPathEntriesToTypedObjects(properties = {}) {
+    const input = isPlainObject(properties) ? properties : {};
+    const out = {};
+    const typedRoots = new Map();
+    for (const [key, value] of Object.entries(input)) {
+      const rawKey = safeString(key).trim();
+      if (!rawKey) continue;
+      if (!rawKey.includes("/")) {
+        out[rawKey] = value;
+        continue;
+      }
+      const [root, ...rest] = rawKey.split("/");
+      const rootKey = safeString(root).trim();
+      const leafKey = safeString(rest.join("/")).trim();
+      if (!rootKey || !leafKey) {
+        out[rawKey] = value;
+        continue;
+      }
+      const existingRoot = typedRoots.get(rootKey);
+      const rootObj = isPlainObject(existingRoot)
+        ? { ...existingRoot }
+        : (isPlainObject(out[rootKey]) ? { ...out[rootKey] } : {});
+      rootObj[leafKey] = value;
+      typedRoots.set(rootKey, rootObj);
+      out[rootKey] = rootObj;
+    }
+    for (const [rootKey, rootObj] of typedRoots.entries()) {
+      const declared = input[rootKey];
+      if (isPlainObject(declared) && hasNonEmpty(declared.type)) {
+        rootObj.type = safeString(declared.type).trim();
+      } else {
+        const declaredType = safeString(declared).trim();
+        if (declaredType) rootObj.type = declaredType;
+      }
+      out[rootKey] = rootObj;
+      for (const key of Object.keys(out)) {
+        if (safeString(key).trim().startsWith(`${rootKey}/`)) delete out[key];
       }
     }
     return out;

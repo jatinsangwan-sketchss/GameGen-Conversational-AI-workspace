@@ -32,6 +32,97 @@ function normalizeGodot4Syntax(content) {
   return text;
 }
 
+function stripCodeFences(text) {
+  const raw = safeString(text);
+  const fenced = raw.match(/```(?:gdscript|gd)?\s*([\s\S]*?)```/i);
+  if (fenced && safeString(fenced[1]).trim()) return fenced[1].trim();
+  return raw.trim();
+}
+
+function validateGodot4Script(content) {
+  const text = safeString(content);
+  const issues = [];
+  const push = (code, message) => issues.push({ code, message });
+  if (!text.trim()) push("empty_script", "Generated script is empty.");
+  if (/(^|\n)\s*export\s+var\b/.test(text)) push("godot3_export_var", "Uses Godot 3.x `export var` syntax.");
+  if (/(^|\n)\s*onready\s+var\b/.test(text)) push("godot3_onready_var", "Uses Godot 3.x `onready var` syntax.");
+  if (/\byield\s*\(/.test(text)) push("godot3_yield", "Uses Godot 3.x `yield()` syntax.");
+  const extendsMatches = text.match(/(^|\n)\s*extends\s+[^\n]+/g) || [];
+  if (extendsMatches.length > 1) push("duplicate_extends", "Contains multiple `extends` declarations.");
+  return { ok: issues.length === 0, issues };
+}
+
+async function attemptGodot4Repair({
+  invalidContent = "",
+  issues = [],
+  intent = "",
+  generationContext = null,
+  toolName = "",
+  modelClient = null,
+} = {}) {
+  const normalized = normalizeGodot4Syntax(invalidContent);
+  const normalizedCheck = validateGodot4Script(normalized);
+  if (normalizedCheck.ok) {
+    return {
+      ok: true,
+      content: normalized,
+      repairedBy: "normalizer",
+      issues: [],
+    };
+  }
+  if (!modelClient || typeof modelClient.generate !== "function") {
+    return {
+      ok: false,
+      content: normalized,
+      repairedBy: null,
+      issues: normalizedCheck.issues,
+      reason: "model_repair_unavailable",
+    };
+  }
+
+  const repairPrompt = [
+    "Repair this GDScript to valid Godot 4.6 style.",
+    "Return only code, no markdown fences.",
+    "Keep behavior intent unchanged.",
+    `tool: ${safeString(toolName).trim()}`,
+    `intent: ${safeString(intent).trim()}`,
+    `generationContext: ${JSON.stringify(isPlainObject(generationContext) ? generationContext : {})}`,
+    `validationIssues: ${JSON.stringify(Array.isArray(issues) ? issues : [])}`,
+    "invalidCode:",
+    safeString(invalidContent),
+  ].join("\n");
+
+  try {
+    const repairedRaw = await modelClient.generate({ prompt: repairPrompt, responseFormat: "text" });
+    const repairedText = stripCodeFences(safeString(repairedRaw?.text ?? repairedRaw));
+    const finalText = normalizeGodot4Syntax(repairedText);
+    const finalCheck = validateGodot4Script(finalText);
+    if (finalCheck.ok) {
+      return {
+        ok: true,
+        content: finalText,
+        repairedBy: "model_repair",
+        issues: [],
+      };
+    }
+    return {
+      ok: false,
+      content: finalText,
+      repairedBy: "model_repair",
+      issues: finalCheck.issues,
+      reason: "repair_failed_validation",
+    };
+  } catch {
+    return {
+      ok: false,
+      content: normalized,
+      repairedBy: null,
+      issues: normalizedCheck.issues,
+      reason: "repair_call_failed",
+    };
+  }
+}
+
 function buildPrompt({ contentIntent, toolName, semanticState, args, generationContext }) {
   const targetRefs = isPlainObject(semanticState?.targetRefs) ? semanticState.targetRefs : {};
   const creationIntent = isPlainObject(semanticState?.creationIntent) ? semanticState.creationIntent : {};
@@ -133,6 +224,13 @@ function parseGeneratedPayload(raw) {
 
 const DEBUG_VERIFY = safeString(process.env.DEBUG_GENERIC_MCP_VERIFY).trim().toLowerCase() === "true";
 
+function isScriptValidationEnabled(workflowState = null) {
+  return Boolean(
+    workflowState?.featureFlags?.scriptValidation?.enabled ||
+    workflowState?.semanticState?.knownFacts?.scriptValidationEnabled
+  );
+}
+
 export async function ensureGeneratedContentForStep({
   toolName,
   args = null,
@@ -195,6 +293,31 @@ export async function ensureGeneratedContentForStep({
 
   const existing = isPlainObject(semanticState?.generatedContent) ? semanticState.generatedContent : null;
   if (existing && normalizeIntentKey(existing.intent) === normalizeIntentKey(contentIntent) && safeString(existing.content).trim()) {
+    if (isScriptValidationEnabled(workflowState) && isGodotScriptLikeContext({ toolName, generationContext })) {
+      const existingValidation = validateGodot4Script(existing.content);
+      if (!existingValidation.ok) {
+        const repaired = await attemptGodot4Repair({
+          invalidContent: existing.content,
+          issues: existingValidation.issues,
+          intent: contentIntent,
+          generationContext,
+          toolName,
+          modelClient,
+        });
+        if (!repaired.ok) {
+          return {
+            status: "not_ready",
+            generatedContent: null,
+            reason: `script_validation_failed: ${safeString(repaired.reason).trim() || "invalid_godot46_script"}`,
+            generationContext,
+            missingSemanticField: null,
+          };
+        }
+        existing.content = safeString(repaired.content);
+        existing.repairedForGodot46 = true;
+        existing.repairMethod = safeString(repaired.repairedBy).trim() || "unknown";
+      }
+    }
     const out = {
       status: "ready",
       generatedContent: existing,
@@ -268,6 +391,37 @@ export async function ensureGeneratedContentForStep({
       source: "fallback",
       contextReadiness: safeString(targetReadiness?.status).trim() || "generate_with_partial_context",
     };
+  }
+
+  if (isScriptValidationEnabled(workflowState) && isGodotScriptLikeContext({ toolName, generationContext })) {
+    const initial = validateGodot4Script(generated?.content);
+    if (!initial.ok) {
+      const repaired = await attemptGodot4Repair({
+        invalidContent: generated?.content,
+        issues: initial.issues,
+        intent: contentIntent,
+        generationContext,
+        toolName,
+        modelClient,
+      });
+      if (repaired.ok) {
+        generated = {
+          ...generated,
+          content: safeString(repaired.content),
+          source: safeString(generated?.source).trim() || "model",
+          repairedForGodot46: true,
+          repairMethod: safeString(repaired.repairedBy).trim() || "unknown",
+        };
+      } else {
+        return {
+          status: "not_ready",
+          generatedContent: null,
+          reason: `script_validation_failed: ${safeString(repaired.reason).trim() || "invalid_godot46_script"}`,
+          generationContext,
+          missingSemanticField: null,
+        };
+      }
+    }
   }
 
   const out = {

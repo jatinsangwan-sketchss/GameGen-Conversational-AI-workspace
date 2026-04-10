@@ -124,7 +124,7 @@ function toGodotPath(value) {
 }
 function looksAttachToolName(toolName) {
   const normalized = safeString(toolName).replace(/[_-]+/g, " ").toLowerCase();
-  return /\b(attach|assign|link|bind)\b/.test(normalized) || /\bset\b.*\b(script|property|properties)\b/.test(normalized);
+  return /\b(attach|assign|link|bind)\b/.test(normalized) || /\bset\b.*\bscript\b/.test(normalized);
 }
 function hasScriptPropertyHint(args = {}) {
   const a = toArgs(args);
@@ -143,6 +143,54 @@ function hasScriptPropertyHint(args = {}) {
     }
   }
   return false;
+}
+
+function isLikelyReadOnlyToolName(toolName) {
+  const t = safeString(toolName).trim().toLowerCase();
+  if (!t) return false;
+  const hasReadVerb = /\b(get|read|list|show|find|inspect|query|fetch|describe)\b/.test(t);
+  const hasWriteVerb = /\b(set|add|create|new|update|modify|edit|patch|delete|remove|attach|assign|link|save|write)\b/.test(t);
+  return hasReadVerb && !hasWriteVerb;
+}
+
+function isLikelyMutationToolName(toolName) {
+  const t = safeString(toolName).trim().toLowerCase();
+  if (!t) return false;
+  return /\b(set|add|create|new|update|modify|edit|patch|delete|remove|attach|assign|link|save|write|duplicate|reparent)\b/.test(t);
+}
+
+function tokenizeIdentity(value) {
+  return (safeString(value).toLowerCase().match(/[a-z0-9]+/g) ?? []).filter(Boolean);
+}
+
+function parseJsonLikeContentBlocks(rawResult) {
+  const out = [];
+  if (isPlainObject(rawResult)) out.push(rawResult);
+  if (Array.isArray(rawResult?.content)) {
+    for (const block of rawResult.content) {
+      const text = safeString(block?.text).trim();
+      if (!text) continue;
+      try {
+        out.push(JSON.parse(text));
+      } catch {
+        // ignore non-json text blocks
+      }
+    }
+  }
+  return out.filter((v) => isPlainObject(v));
+}
+
+function parsePropertyContainer(raw) {
+  if (isPlainObject(raw)) return raw;
+  if (typeof raw !== "string") return null;
+  const text = safeString(raw).trim();
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return isPlainObject(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 const VERIFIABLE_ARTIFACT_EXTENSIONS = new Set([
   ".tscn",
@@ -263,6 +311,57 @@ export class Executor {
     }
 
     const payload = this.buildPayload({ toolName, args: toArgs(args) });
+    const expectsCreation = this._expectsArtifactCreation({ toolName, workflowState });
+    const genericReadbackPlan = this._planGenericReadback({
+      toolName,
+      mutationArgs: toArgs(args),
+      inventory,
+    });
+    const strictMutationVerification =
+      this._isMutationLikeCall({ toolName, args: toArgs(args) }) &&
+      !this._isAttachLikeMutation({ toolName, args: toArgs(args) });
+    if (!expectsCreation && strictMutationVerification && safeString(genericReadbackPlan?.reason).trim() === "readback_args_unavailable") {
+      return {
+        ok: false,
+        tool: toolName,
+        args: toArgs(args),
+        rawResult: null,
+        error: "Mutation verification unavailable: read-back tool exists but required read arguments could not be compiled.",
+        verification: {
+          readback: {
+            enabled: false,
+            reason: "readback_args_unavailable",
+          },
+        },
+      };
+    }
+    let preMutationReadback = null;
+    if (genericReadbackPlan?.enabled && !expectsCreation) {
+      preMutationReadback = await this._runGenericReadback({
+        client,
+        readTool: genericReadbackPlan.readTool,
+        readArgs: genericReadbackPlan.readArgs,
+        phase: "pre",
+      });
+      if (!preMutationReadback.ok) {
+        return {
+          ok: false,
+          tool: toolName,
+          args: toArgs(args),
+          rawResult: null,
+          error: preMutationReadback.reason || "Pre-mutation read-back failed.",
+          verification: {
+            readback: {
+              enabled: true,
+              readTool: safeString(genericReadbackPlan.readTool?.name).trim() || null,
+              preOk: false,
+              postOk: null,
+              readArgs: isPlainObject(genericReadbackPlan.readArgs) ? genericReadbackPlan.readArgs : null,
+            },
+          },
+        };
+      }
+    }
     const verifyArgs = toArgs(args);
     const semanticState = isPlainObject(workflowState?.semanticState) ? workflowState.semanticState : {};
     const arrayLenOrNull = (v) => (Array.isArray(v) ? v.length : null);
@@ -353,6 +452,23 @@ export class Executor {
         error = attachVerification.reason || "Attach verification failed.";
       }
     }
+    let genericReadbackVerification = { ok: true };
+    if (ok) {
+      genericReadbackVerification = await this._verifyMutationViaReadback({
+        toolName,
+        args: toArgs(args),
+        rawResult,
+        client,
+        inventory,
+        workflowState,
+        plannedReadback: genericReadbackPlan,
+        preReadback: preMutationReadback,
+      });
+      if (!genericReadbackVerification.ok) {
+        ok = false;
+        error = genericReadbackVerification.reason || "Mutation verification failed.";
+      }
+    }
 
     if (this._debug) {
       // eslint-disable-next-line no-console
@@ -381,6 +497,15 @@ export class Executor {
       args: toArgs(args),
       rawResult,
       error,
+      verification: {
+        readback: {
+          enabled: Boolean(genericReadbackPlan?.enabled),
+          readTool: safeString(genericReadbackPlan?.readTool?.name).trim() || null,
+          preOk: Boolean(preMutationReadback?.ok),
+          postOk: Boolean(genericReadbackVerification?.ok),
+          readArgs: isPlainObject(genericReadbackPlan?.readArgs) ? genericReadbackPlan.readArgs : null,
+        },
+      },
     };
   }
 
@@ -468,7 +593,9 @@ export class Executor {
     const scriptTarget = pickFirstText([args.scriptPath, args.scriptRef]);
     const nodeTarget = pickFirstText([args.nodePath, args.targetNodePath, args.targetNode, args.nodeRef, args.targetNodeRef]);
     const sceneTarget = pickFirstText([args.scenePath, args.sceneRef]);
-    const stepLooksAttach = looksAttachToolName(stepToolName) || hasScriptPropertyHint(args) || Boolean(nodeTarget && sceneTarget);
+    const stepLooksAttach =
+      Boolean(scriptTarget) &&
+      (looksAttachToolName(stepToolName) || hasScriptPropertyHint(args));
     if (!stepLooksAttach) {
       return { ok: true };
     }
@@ -684,6 +811,275 @@ export class Executor {
       const k = normalizeKey(t?.name);
       return k.includes("node") && k.includes("propert") && (k.includes("get") || k.includes("read") || k.includes("fetch"));
     }) || null;
+  }
+
+  _isAttachLikeMutation({ toolName = "", args = {} } = {}) {
+    return looksAttachToolName(toolName) || hasScriptPropertyHint(args);
+  }
+
+  _isMutationLikeCall({ toolName = "", args = {} } = {}) {
+    const a = toArgs(args);
+    if (this._isAttachLikeMutation({ toolName, args: a })) return true;
+    if (isLikelyMutationToolName(toolName)) return true;
+    const hasPropertyPayload =
+      isPlainObject(a.properties) ||
+      isPlainObject(a.propertyMap) ||
+      isPlainObject(a.props) ||
+      typeof a.properties === "string" ||
+      typeof a.propertyMap === "string" ||
+      typeof a.props === "string";
+    return hasPropertyPayload;
+  }
+
+  _collectDomainTokensFromArgs(args = {}) {
+    const a = toArgs(args);
+    const out = new Set();
+    const add = (k) => {
+      const nk = normalizeKey(k);
+      if (!nk) return;
+      if (nk.includes("scene")) out.add("scene");
+      if (nk.includes("node") || nk.includes("parent")) out.add("node");
+      if (nk.includes("script")) out.add("script");
+      if (nk.includes("resource")) out.add("resource");
+      if (nk.includes("file")) out.add("file");
+      if (nk.includes("property") || nk.includes("props")) out.add("property");
+      if (nk.includes("setting")) out.add("setting");
+      if (nk.includes("input")) out.add("input");
+      if (nk.includes("project")) out.add("project");
+      if (nk === "path" || nk.endsWith("path")) out.add("path");
+    };
+    for (const key of Object.keys(a)) add(key);
+    return out;
+  }
+
+  _scoreReadToolCandidate({ mutationToolName = "", mutationArgs = {}, readTool = null } = {}) {
+    if (!isPlainObject(readTool)) return -1;
+    const name = safeString(readTool.name).trim();
+    if (!name || !isLikelyReadOnlyToolName(name)) return -1;
+    const mutationTokens = new Set([
+      ...tokenizeIdentity(mutationToolName),
+      ...this._collectDomainTokensFromArgs(mutationArgs),
+    ]);
+    const readTokens = new Set(tokenizeIdentity(name));
+    const schema = extractInputSchema(readTool);
+    const keys = [
+      ...(Array.isArray(schema.required) ? schema.required : []),
+      ...(isPlainObject(schema.properties) ? Object.keys(schema.properties) : []),
+    ];
+    for (const k of keys) readTokens.add(normalizeKey(k));
+    let score = 0;
+    for (const token of mutationTokens) {
+      if (readTokens.has(token)) score += 2;
+      if ([...readTokens].some((t) => safeString(t).includes(token))) score += 1;
+    }
+    if (readTokens.has("scene") && mutationTokens.has("scene")) score += 2;
+    if (readTokens.has("node") && mutationTokens.has("node")) score += 2;
+    if (readTokens.has("setting") && mutationTokens.has("setting")) score += 2;
+    const hasPropertyPayload =
+      isPlainObject(mutationArgs?.properties) ||
+      isPlainObject(mutationArgs?.propertyMap) ||
+      isPlainObject(mutationArgs?.props) ||
+      typeof mutationArgs?.properties === "string" ||
+      typeof mutationArgs?.propertyMap === "string" ||
+      typeof mutationArgs?.props === "string";
+    if (hasPropertyPayload) {
+      const hasPropertyReadShape =
+        readTokens.has("property") ||
+        readTokens.has("properties") ||
+        [...readTokens].some((t) => safeString(t).includes("propert"));
+      if (hasPropertyReadShape) score += 5;
+      else score -= 2;
+    }
+    if (name === mutationToolName) score = -1;
+    return score;
+  }
+
+  _pickGenericReadbackTool({ mutationToolName = "", mutationArgs = {}, inventory = null } = {}) {
+    const tools = inventory && typeof inventory.getInventory === "function"
+      ? (Array.isArray(inventory.getInventory()?.tools) ? inventory.getInventory().tools : [])
+      : [];
+    let best = null;
+    let bestScore = -1;
+    for (const tool of tools) {
+      const score = this._scoreReadToolCandidate({
+        mutationToolName,
+        mutationArgs,
+        readTool: tool,
+      });
+      if (score > bestScore) {
+        bestScore = score;
+        best = tool;
+      }
+    }
+    return bestScore > 1 ? best : null;
+  }
+
+  _planGenericReadback({ toolName = "", mutationArgs = {}, inventory = null } = {}) {
+    if (!this._isMutationLikeCall({ toolName, args: mutationArgs })) {
+      return { enabled: false, reason: "not_mutation_like" };
+    }
+    if (this._isAttachLikeMutation({ toolName, args: mutationArgs })) {
+      return { enabled: false, reason: "attach_like_has_dedicated_verifier" };
+    }
+    const readTool = this._pickGenericReadbackTool({
+      mutationToolName: toolName,
+      mutationArgs,
+      inventory,
+    });
+    if (!readTool) return { enabled: false, reason: "no_readback_tool" };
+    const readArgs = this._buildGenericReadbackArgs({
+      readTool,
+      mutationArgs,
+    });
+    if (!isPlainObject(readArgs) || Object.keys(readArgs).length < 1) {
+      return { enabled: false, reason: "readback_args_unavailable" };
+    }
+    return { enabled: true, readTool, readArgs };
+  }
+
+  async _runGenericReadback({ client, readTool, readArgs, phase = "post" } = {}) {
+    let verifyRaw = null;
+    try {
+      verifyRaw = await this._callTool(client, {
+        toolName: readTool.name,
+        args: readArgs,
+        payload: this.buildPayload({ toolName: readTool.name, args: readArgs }),
+      });
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `${phase === "pre" ? "Pre-mutation" : "Post-mutation"} read-back failed (${safeString(err?.message ?? err).trim() || "unknown error"}).`,
+        raw: null,
+      };
+    }
+    if (!isRawResultOk(verifyRaw)) {
+      return {
+        ok: false,
+        reason: `${phase === "pre" ? "Pre-mutation" : "Post-mutation"} read-back tool failed (${this.extractFailureText(verifyRaw)}).`,
+        raw: verifyRaw,
+      };
+    }
+    return { ok: true, reason: null, raw: verifyRaw };
+  }
+
+  _pickValueForReadArg({ requiredKey = "", mutationArgs = {} } = {}) {
+    const rk = normalizeKey(requiredKey);
+    const a = toArgs(mutationArgs);
+    const groups = [
+      ["scenePath", "scene_path", "sceneRef", "scene", "path"],
+      ["nodePath", "targetNodePath", "targetNode", "nodeRef", "targetNodeRef", "parentPath"],
+      ["scriptPath", "scriptRef", "filePath", "fileRef", "resourcePath", "resourceRef", "artifactRef", "path"],
+      ["propertyName", "property", "key", "name"],
+      ["projectPath", "project_path", "projectRoot", "project_root"],
+      ["settingPath", "settingRef", "setting", "key", "path"],
+      ["inputMap", "inputAction", "inputName", "name", "key"],
+    ];
+    const byCategory = (candidates) => {
+      for (const k of candidates) {
+        const v = safeString(a[k]).trim();
+        if (v) return v;
+      }
+      return null;
+    };
+    if (rk.includes("scene")) return byCategory(groups[0]);
+    if (rk.includes("node") || rk.includes("parent")) return byCategory(groups[1]);
+    if (rk.includes("script") || rk.includes("file") || rk.includes("resource") || rk.includes("artifact")) return byCategory(groups[2]);
+    if (rk.includes("property")) return byCategory(groups[3]);
+    if (rk.includes("project")) return byCategory(groups[4]);
+    if (rk.includes("setting")) return byCategory(groups[5]);
+    if (rk.includes("input")) return byCategory(groups[6]);
+    if (rk === "path" || rk.endsWith("path")) return byCategory([...groups[0], ...groups[1], ...groups[2]]);
+    return byCategory([...groups[0], ...groups[1], ...groups[2], ...groups[3], ...groups[5], ...groups[6]]);
+  }
+
+  _buildGenericReadbackArgs({ readTool = null, mutationArgs = {} } = {}) {
+    const schema = extractInputSchema(readTool);
+    const required = normalizeRequired(schema);
+    if (required.length < 1) return null;
+    const out = {};
+    for (const key of required) {
+      const value = this._pickValueForReadArg({ requiredKey: key, mutationArgs });
+      if (!safeString(value).trim()) return null;
+      out[key] = value;
+    }
+    const projectPath = this._pickValueForReadArg({ requiredKey: "projectPath", mutationArgs });
+    if (safeString(projectPath).trim()) {
+      out.projectPath = safeString(projectPath).trim();
+      out.project_path = safeString(projectPath).trim();
+    }
+    return out;
+  }
+
+  _hasExpectedMutationEvidence({ mutationArgs = {}, verifyRaw = null } = {}) {
+    const a = toArgs(mutationArgs);
+    const payloads = parseJsonLikeContentBlocks(verifyRaw);
+    const propertyPayload =
+      parsePropertyContainer(a.properties) ||
+      parsePropertyContainer(a.propertyMap) ||
+      parsePropertyContainer(a.props) ||
+      null;
+    if (!propertyPayload) return true;
+    const expectedKeys = Object.keys(propertyPayload)
+      .map((k) => safeString(k).trim())
+      .filter(Boolean);
+    if (expectedKeys.length < 1) return true;
+    const haystacks = [];
+    for (const p of payloads) {
+      haystacks.push(JSON.stringify(p));
+      if (isPlainObject(p.properties)) haystacks.push(JSON.stringify(p.properties));
+      if (isPlainObject(p.node_properties)) haystacks.push(JSON.stringify(p.node_properties));
+    }
+    const merged = haystacks.join("\n").toLowerCase();
+    if (!merged) return false;
+    const expectedRoots = [...new Set(expectedKeys
+      .map((k) => safeString(k).trim().toLowerCase())
+      .map((k) => k.split("/")[0])
+      .filter(Boolean))];
+    if (expectedRoots.length < 1) return true;
+    return expectedRoots.some((k) => merged.includes(k));
+  }
+
+  async _verifyMutationViaReadback({
+    toolName,
+    args,
+    rawResult,
+    client,
+    inventory,
+    workflowState,
+    plannedReadback = null,
+    preReadback = null,
+  }) {
+    if (!this._isMutationLikeCall({ toolName, args })) return { ok: true };
+    if (this._isAttachLikeMutation({ toolName, args })) return { ok: true };
+    if (!isRawResultOk(rawResult)) return { ok: true };
+    const plan = isPlainObject(plannedReadback)
+      ? plannedReadback
+      : this._planGenericReadback({ toolName, mutationArgs: args, inventory });
+    if (!plan?.enabled) return { ok: true };
+    const pre = isPlainObject(preReadback) ? preReadback : { ok: true, raw: null };
+    if (!pre.ok) return { ok: false, reason: pre.reason || "Pre-mutation read-back failed." };
+    const post = await this._runGenericReadback({
+      client,
+      readTool: plan.readTool,
+      readArgs: plan.readArgs,
+      phase: "post",
+    });
+    if (!post.ok) return { ok: false, reason: post.reason || "Post-mutation read-back failed." };
+    const evidenceOk = this._hasExpectedMutationEvidence({
+      mutationArgs: args,
+      verifyRaw: post.raw,
+    });
+    if (!evidenceOk) {
+      return {
+        ok: false,
+        reason: "Post-mutation read-back did not contain expected target/property evidence.",
+      };
+    }
+    return {
+      ok: true,
+      readTool: safeString(plan?.readTool?.name).trim() || null,
+      readArgs: isPlainObject(plan?.readArgs) ? plan.readArgs : null,
+    };
   }
 
   _buildNodePropertiesReadArgs({ tool, sceneTarget, nodeTarget, args }) {

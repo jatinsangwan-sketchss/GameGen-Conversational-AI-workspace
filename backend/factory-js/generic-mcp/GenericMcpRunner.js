@@ -153,6 +153,34 @@ function semanticResolvedArgCandidates(field) {
   return [...out];
 }
 
+function extractFeatureTriggerInfo(userRequest, priorWorkflow = null) {
+  const raw = safeString(userRequest);
+  const tscnRegex = /\btscn\s+edit\b\s*:?/i;
+  const scriptValidationRegex = /\bscript\s+valid\?\s*:?/i;
+  const promptHadTscnTrigger = tscnRegex.test(raw);
+  const promptHadScriptValidationTrigger = scriptValidationRegex.test(raw);
+  const priorTscnEnabled = Boolean(priorWorkflow?.featureFlags?.tscnEdit?.enabled);
+  const priorScriptValidationEnabled = Boolean(priorWorkflow?.featureFlags?.scriptValidation?.enabled);
+  const tscnEnabled = promptHadTscnTrigger || priorTscnEnabled;
+  const scriptValidationEnabled = promptHadScriptValidationTrigger || priorScriptValidationEnabled;
+  const sanitizedRequest = raw
+    .replace(tscnRegex, " ")
+    .replace(scriptValidationRegex, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return {
+    tscnEdit: {
+      enabled: tscnEnabled,
+      promptHadTrigger: promptHadTscnTrigger,
+    },
+    scriptValidation: {
+      enabled: scriptValidationEnabled,
+      promptHadTrigger: promptHadScriptValidationTrigger,
+    },
+    sanitizedRequest: sanitizedRequest || raw.trim(),
+  };
+}
+
 export class GenericMcpRunner {
   constructor({
     sessionManager = null,
@@ -359,9 +387,25 @@ export class GenericMcpRunner {
         ...(isPlainObject(sessionStatus) ? sessionStatus : {}),
       },
     };
-    const workflowState = this._initWorkflowState({ userRequest: request, resumeNeedsInput });
+    const priorWorkflow = isPlainObject(resumeNeedsInput?.workflow) ? resumeNeedsInput.workflow : null;
+    const featureTrigger = extractFeatureTriggerInfo(request, priorWorkflow);
+    const plannerRequest = safeString(featureTrigger.sanitizedRequest).trim() || request;
+    const workflowState = this._initWorkflowState({
+      userRequest: plannerRequest,
+      resumeNeedsInput,
+      tscnEdit: featureTrigger.tscnEdit,
+      scriptValidation: featureTrigger.scriptValidation,
+    });
+    console.log("[VERIFY][tscn-edit-trigger]", {
+      enabled: Boolean(featureTrigger.tscnEdit?.enabled),
+      promptHadTrigger: Boolean(featureTrigger.tscnEdit?.promptHadTrigger),
+    });
+    console.log("[VERIFY][script-validation-trigger]", {
+      enabled: Boolean(featureTrigger.scriptValidation?.enabled),
+      promptHadTrigger: Boolean(featureTrigger.scriptValidation?.promptHadTrigger),
+    });
     this._ensureCanonicalSemanticState(workflowState);
-    let seedDecision = this._buildResumePlan(resumeNeedsInput, request);
+    let seedDecision = this._buildResumePlan(resumeNeedsInput, plannerRequest);
     let lastPlanning = null;
     let lastResolved = null;
     const allStepResults = [];
@@ -449,7 +493,7 @@ export class GenericMcpRunner {
       const planning =
         seedDecision ??
         (await toolPlanner.plan({
-          userRequest: request,
+          userRequest: plannerRequest,
           sessionContext: plannerSessionContext,
         }));
       seedDecision = null;
@@ -466,6 +510,37 @@ export class GenericMcpRunner {
       const decisionStatus = safeString(planning?.status).trim();
 
       if (decisionStatus === "done") {
+        const pendingTargetedEdits = Array.isArray(workflowState?.semanticState?.targetedEdits)
+          ? workflowState.semanticState.targetedEdits
+          : [];
+        if (pendingTargetedEdits.length > 0) {
+          workflowState.unmetPostconditions = [...new Set([
+            ...(Array.isArray(workflowState.unmetPostconditions) ? workflowState.unmetPostconditions : []),
+            "targetedEditsPending",
+          ])];
+          workflowState.doneWithoutPostconditionCount = Number(workflowState.doneWithoutPostconditionCount || 0) + 1;
+          if (workflowState.doneWithoutPostconditionCount >= 2) {
+            return this._buildRunResult({
+              ok: false,
+              status: "failed",
+              reason: `Partial completion: unresolved targeted edits remain (${pendingTargetedEdits.length}).`,
+              sessionStatus,
+              inventorySummary: { toolCount: inventory.toolCount, fetchedAt: inventory.fetchedAt },
+              planningResult: planning,
+              resolvedPlan: lastResolved,
+              executionResult: { ok: false, results: allStepResults, error: "targeted_edits_pending" },
+              presentation: `Stopped with partial completion. Unresolved targeted edits: ${pendingTargetedEdits.length}`,
+              workflowState,
+              runtimeState: this._runtimeWithWorkflow({
+                planningResult: planning,
+                resolvedPlan: lastResolved,
+                inventory,
+                workflowState,
+              }),
+            });
+          }
+          continue;
+        }
         const effectState = this._refreshEffectState(workflowState);
         if (this._isContentBearingWorkflow(workflowState) && !this._hasGeneratedOrCompiledContent(workflowState)) {
           return this._buildRunResult({
@@ -803,6 +878,7 @@ export class GenericMcpRunner {
         artifactCountAfter: artifactsAfter,
       });
       this._refreshSemanticStateFromStep(workflowState, gatedReadyPlan, executionResult);
+      this._consumeSatisfiedTargetedEditsFromStep(workflowState, gatedReadyPlan, executionResult);
       this._ensureCanonicalSemanticState(workflowState);
       workflowState.doneWithoutPostconditionCount = 0;
 
@@ -1560,7 +1636,7 @@ export class GenericMcpRunner {
     };
   }
 
-  _initWorkflowState({ userRequest, resumeNeedsInput }) {
+  _initWorkflowState({ userRequest, resumeNeedsInput, tscnEdit = null, scriptValidation = null }) {
     const prior = isPlainObject(resumeNeedsInput?.workflow) ? resumeNeedsInput.workflow : null;
     const priorIntent = isPlainObject(prior?.semanticIntent) ? prior.semanticIntent : null;
     const semanticIntent = this._sanitizeSemanticIntent({
@@ -1596,7 +1672,29 @@ export class GenericMcpRunner {
       generatedArtifacts: generatedArtifacts.slice(-6),
       doneWithoutPostconditionCount: Number(prior?.doneWithoutPostconditionCount) || 0,
       unmetPostconditions: Array.isArray(prior?.unmetPostconditions) ? [...prior.unmetPostconditions] : [],
+      featureFlags: isPlainObject(prior?.featureFlags) ? { ...prior.featureFlags } : {},
     };
+    workflowState.featureFlags.tscnEdit = {
+      enabled: Boolean(
+        tscnEdit?.enabled ??
+        prior?.featureFlags?.tscnEdit?.enabled ??
+        false
+      ),
+      promptHadTrigger: Boolean(tscnEdit?.promptHadTrigger ?? false),
+    };
+    workflowState.featureFlags.scriptValidation = {
+      enabled: Boolean(
+        scriptValidation?.enabled ??
+        prior?.featureFlags?.scriptValidation?.enabled ??
+        false
+      ),
+      promptHadTrigger: Boolean(scriptValidation?.promptHadTrigger ?? false),
+    };
+    if (!isPlainObject(workflowState.semanticState.knownFacts)) workflowState.semanticState.knownFacts = {};
+    workflowState.semanticState.knownFacts.tscnEditEnabled = Boolean(workflowState.featureFlags?.tscnEdit?.enabled);
+    workflowState.semanticState.knownFacts.scriptValidationEnabled = Boolean(
+      workflowState.featureFlags?.scriptValidation?.enabled
+    );
     this._refreshEffectState(workflowState);
     this._ensureCanonicalSemanticState(workflowState);
     return workflowState;
@@ -1692,6 +1790,7 @@ export class GenericMcpRunner {
       artifactOperation: isPlainObject(wf.artifactOperation) ? wf.artifactOperation : {},
       generatedArtifacts: Array.isArray(wf.generatedArtifacts) ? wf.generatedArtifacts.slice(-3) : [],
       unmetPostconditions: Array.isArray(wf.unmetPostconditions) ? wf.unmetPostconditions : [],
+      featureFlags: isPlainObject(wf.featureFlags) ? wf.featureFlags : {},
       effectState: isPlainObject(wf.effectState) ? wf.effectState : {
         expectedEffects: [],
         satisfiedEffects: [],
@@ -1710,11 +1809,95 @@ export class GenericMcpRunner {
       ok: Boolean(res0?.ok),
       args: this._compactArgsForHistory(args),
       summary: this._compactResultSummary(res0?.rawResult),
+      verification: isPlainObject(res0?.verification) ? res0.verification : null,
     };
     workflowState.history = Array.isArray(workflowState.history) ? workflowState.history : [];
     workflowState.history.push(compact);
     workflowState.stepCount = Number(workflowState.stepCount || 0) + 1;
     this._updateSemanticIntentFromStep(workflowState, args);
+  }
+
+  _extractPropertyMutationContext(args = {}) {
+    const a = isPlainObject(args) ? args : {};
+    const nodeValue =
+      safeString(a.nodePath).trim() ||
+      safeString(a.targetNodePath).trim() ||
+      safeString(a.parentPath).trim() ||
+      safeString(a.nodeRef).trim() ||
+      safeString(a.targetNodeRef).trim() ||
+      safeString(a.targetNode).trim() ||
+      "";
+    const nodeLeaf = safeString(nodeValue.split("/").pop()).trim();
+    const propertyKeys = new Set();
+    const readContainer = (raw) => {
+      if (isPlainObject(raw)) return raw;
+      if (typeof raw !== "string") return null;
+      try {
+        const parsed = JSON.parse(raw);
+        return isPlainObject(parsed) ? parsed : null;
+      } catch {
+        return null;
+      }
+    };
+    for (const key of ["properties", "propertyMap", "props"]) {
+      const parsed = readContainer(a[key]);
+      if (!isPlainObject(parsed)) continue;
+      for (const k of Object.keys(parsed)) {
+        const nk = safeString(k).trim().toLowerCase();
+        if (nk) propertyKeys.add(nk);
+      }
+    }
+    const singular = safeString(a.property || a.propertyName || a.settingName).trim().toLowerCase();
+    if (singular) propertyKeys.add(singular);
+    return { nodeValue, nodeLeaf, propertyKeys };
+  }
+
+  _consumeSatisfiedTargetedEditsFromStep(workflowState, resolvedPlan, executionResult) {
+    if (!isPlainObject(workflowState?.semanticState)) return;
+    const edits = Array.isArray(workflowState.semanticState.targetedEdits) ? workflowState.semanticState.targetedEdits : [];
+    if (edits.length < 1) return;
+    const step = isPlainObject(resolvedPlan?.tools?.[0]) ? resolvedPlan.tools[0] : {};
+    const stepTool = safeString(step?.name).trim().toLowerCase();
+    const stepOk = Boolean(executionResult?.ok);
+    if (!stepOk) return;
+    const looksSetter = /set|update|modify|edit|patch|change/.test(stepTool);
+    if (!looksSetter) return;
+    const { nodeValue, nodeLeaf, propertyKeys } = this._extractPropertyMutationContext(step?.args);
+    if (!nodeValue || propertyKeys.size < 1) return;
+    const normalizedNode = safeString(nodeValue).trim().toLowerCase();
+    const normalizedLeaf = safeString(nodeLeaf).trim().toLowerCase();
+    const matchesNode = (candidate) => {
+      const c = safeString(candidate).trim().toLowerCase();
+      if (!c) return true;
+      if (c === normalizedNode || c === normalizedLeaf) return true;
+      if (normalizedNode.endsWith(`/${c}`)) return true;
+      return false;
+    };
+    const next = edits.filter((edit) => {
+      const obj = isPlainObject(edit) ? edit : {};
+      const directNode =
+        safeString(obj.nodePath).trim() ||
+        safeString(obj.targetNodePath).trim() ||
+        safeString(obj.nodeRef).trim() ||
+        safeString(obj.targetNodeRef).trim() ||
+        safeString(obj.targetNode).trim() ||
+        "";
+      const fieldRaw = safeString(obj.field || obj.property || obj.key).trim();
+      let fieldNode = "";
+      let prop = fieldRaw.toLowerCase();
+      if (fieldRaw.includes(".")) {
+        const idx = fieldRaw.indexOf(".");
+        fieldNode = safeString(fieldRaw.slice(0, idx)).trim();
+        prop = safeString(fieldRaw.slice(idx + 1)).trim().toLowerCase();
+      }
+      const candidateNode = directNode || fieldNode;
+      if (!matchesNode(candidateNode)) return true;
+      const propertyMatched = [...propertyKeys].some((k) => prop === k || prop.startsWith(`${k}.`));
+      return !propertyMatched;
+    });
+    if (next.length !== edits.length) {
+      workflowState.semanticState.targetedEdits = next;
+    }
   }
 
   _mergePlanningSemanticIntoState(workflowState, plan) {
