@@ -14,6 +14,15 @@ import {
 } from "./sessions.js"
 import { saveLayoutFile } from "./utils/layoutStorage.js"
 import { editAsset } from "./services/editAssetService.js"
+import { generateGameBlueprint } from "./services/gameBuild/GameBlueprintService.js"
+import { runGameBuild } from "./services/gameBuild/GameBuildOrchestrator.js"
+import { appendBuildLog, updateBuildStatus } from "./services/gameBuild/GameBuildStore.js"
+import { handleGameBuildStream } from "./services/gameBuild/GameBuildStream.js"
+import { handleAssetSummaryStream } from "./services/summary/AssetSummaryStream.js"
+import { addFinalAssetToSession, moveDraftToFinal, regenerateDraft } from "./services/generation/DraftAssetService.js"
+import { buildFinalDir } from "./services/generation/DraftAssetGenerator.js"
+import fs from "fs"
+import { runComfyTrimSingle } from "./services/comfy/ComfyOrchestrator.js"
 
 
 
@@ -58,7 +67,8 @@ app.post("/api/chat", async (req, res) => {
       chat: response.chat,
       screens: session.screensMetadata || [],
       assets: session.assets || {},
-      designContext: session.designContext || null
+      designContext: session.designContext || null,
+      draftAssets: session.draftAssets || {}
     })
 
   } catch (error) {
@@ -142,6 +152,112 @@ app.post("/api/layout/save", (req, res) => {
     })
   }
 })
+
+/**
+ * Draft summary stream (SSE)
+ */
+app.get("/api/assets/summary/stream", handleAssetSummaryStream)
+
+/**
+ * Regenerate draft asset
+ */
+app.post("/api/assets/regenerate", async (req, res) => {
+  try {
+    const { sessionId = "default", screenName, instructions } = req.body || {}
+    if (!screenName) {
+      return res.status(400).json({ error: "screenName is required" })
+    }
+    const session = getSession(sessionId)
+    const result = await regenerateDraft({
+      openai,
+      session,
+      screenName,
+      instructions
+    })
+    res.json({ draft: result.draft, draftAssets: session.draftAssets || {} })
+  } catch (error) {
+    console.error("Error regenerating draft:", error)
+    res.status(500).json({ error: "Failed to regenerate draft", message: error.message })
+  }
+})
+
+/**
+ * Commit draft asset to final assets folder
+ */
+app.post("/api/assets/commit", async (req, res) => {
+  try {
+    const { sessionId = "default", screenName, draftId, assetMeta } = req.body || {}
+    if (!screenName || !draftId || !assetMeta) {
+      return res.status(400).json({ error: "screenName, draftId, assetMeta are required" })
+    }
+    const session = getSession(sessionId)
+    const { draft, absoluteDraft } = moveDraftToFinal({ session, screenName, draftId })
+
+    const finalDir = buildFinalDir(session.gameName || "game_ui", screenName)
+    fs.mkdirSync(finalDir, { recursive: true })
+    const finalPath = path.join(finalDir, draft.fileName.replace("_draft", ""))
+    fs.copyFileSync(absoluteDraft, finalPath)
+    await runComfyTrimSingle(finalPath)
+
+    const finalAsset = {
+      ...assetMeta,
+      fileName: path.basename(finalPath),
+      path: path.relative(process.cwd(), finalPath)
+    }
+    addFinalAssetToSession({ session, screenName, asset: finalAsset })
+
+    res.json({ asset: finalAsset, assets: session.assets || {} })
+  } catch (error) {
+    console.error("Error committing draft:", error)
+    res.status(500).json({ error: "Failed to commit draft", message: error.message })
+  }
+})
+
+/**
+ * Game build: generate blueprint
+ */
+app.post("/api/game-build/blueprint", (req, res) => {
+  try {
+    const { prdText, sessionId = "default" } = req.body || {}
+    if (!prdText) {
+      return res.status(400).json({ error: "prdText is required" })
+    }
+    const blueprint = generateGameBlueprint({ sessionId, prdText })
+    res.json({ blueprint })
+  } catch (error) {
+    console.error("Error generating blueprint:", error)
+    res.status(500).json({
+      error: "Failed to generate blueprint",
+      message: error.message
+    })
+  }
+})
+
+/**
+ * Game build: start build
+ */
+app.post("/api/game-build/start", async (req, res) => {
+  const { sessionId = "default", blueprint } = req.body || {}
+  if (!blueprint) {
+    return res.status(400).json({ error: "blueprint is required" })
+  }
+
+  updateBuildStatus(sessionId, "queued")
+  appendBuildLog(sessionId, "INFO", "Build queued...")
+
+  runGameBuild({ sessionId, blueprint }).catch((error) => {
+    console.error("Game build failed:", error)
+    appendBuildLog(sessionId, "ERROR", error.message || "Game build failed")
+    updateBuildStatus(sessionId, "error")
+  })
+
+  res.json({ success: true })
+}) 
+
+/**
+ * Game build: stream logs (SSE)
+ */
+app.get("/api/game-build/stream", handleGameBuildStream)
 
 app.listen(3001, () => {
   console.log("Backend running on http://localhost:3001")

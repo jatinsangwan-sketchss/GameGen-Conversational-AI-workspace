@@ -1,0 +1,85 @@
+{
+  "elements": [
+    {
+      "asset": "settings_overlay_bg_overlay_dim",
+      "xPercent": 0.000799467305203652,
+      "yPercent": 0.0033354273624539832,
+      "widthPercent": 0.7179008096492243,
+      "heightPercent": 0.7118739798752637,
+      "rotation": 0,
+      "zIndex": 1
+    },
+    {
+      "asset": "settings_overlay_text_settings",
+      "xPercent": 0.1418345442840841,
+      "yPercent": 0.10564235341469935,
+      "widthPercent": 0.4393002698830743,
+      "heightPercent": 0.0922708474694948,
+      "rotation": 0,
+      "zIndex": 2
+    },
+    {
+      "asset": "settings_overlay_card_settings",
+      "xPercent": 0.012716549273165102,
+      "yPercent": 0.2060306394914237,
+      "widthPercent": 0.6822263502889238,
+      "heightPercent": 0.4125903680805006,
+      "rotation": 0,
+      "zIndex": 3
+    },
+    {
+      "asset": "settings_overlay_btn_toggle_sound",
+      "xPercent": 0.4986236930420001,
+      "yPercent": 0.2662654336797487,
+      "widthPercent": 0.12332648697756274,
+      "heightPercent": 0.06262933959205935,
+      "rotation": 0,
+      "zIndex": 4
+    },
+    {
+      "asset": "settings_overlay_btn_toggle_music",
+      "xPercent": 0.5004077952028227,
+      "yPercent": 0.3446713744410749,
+      "widthPercent": 0.13012162209381437,
+      "heightPercent": 0.06645405028592268,
+      "rotation": 0,
+      "zIndex": 5
+    },
+    {
+      "asset": "settings_overlay_btn_toggle_vibration",
+      "xPercent": 0.37127937238968894,
+      "yPercent": 0.4335858426676432,
+      "widthPercent": 0.29320486488375225,
+      "heightPercent": 0.060716984245126907,
+      "rotation": 0,
+      "zIndex": 6
+    },
+    {
+      "asset": "settings_overlay_btn_back_container",
+      "xPercent": 0.2063475646615944,
+      "yPercent": 0.6248085724300301,
+      "widthPercent": 0.28980729732562854,
+      "heightPercent": 0.08844613677563154,
+      "rotation": 0,
+      "zIndex": 7
+    },
+    {
+      "asset": "settings_overlay_icon_back",
+      "xPercent": 0.2352363687258421,
+      "yPercent": 0.6267196708512431,
+      "widthPercent": 0.223554729942214,
+      "heightPercent": 0.08175289306137203,
+      "rotation": 0,
+      "zIndex": 8
+    },
+    {
+      "asset": "settings_overlay_btn_toggle_sound",
+      "xPercent": 0.4935624170395383,
+      "yPercent": 0.504339612516238,
+      "widthPercent": 0.14031432476818176,
+      "heightPercent": 0.07601582702057728,
+      "rotation": 0,
+      "zIndex": 9
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "elements": [
+    {
+      "asset": "splash_screen_bg_splash_sky",
+      "xPercent": 0.002518158706676425,
+      "yPercent": -0.002398810595474615,
+      "widthPercent": 0.7467801338932768,
+      "heightPercent": 0.7147425128956607,
+      "rotation": 0,
+      "zIndex": 1
+    },
+    {
+      "asset": "splash_screen_logo_balloon_rise",
+      "xPercent": 0.1486675986811138,
+      "yPercent": 0.24619347976485,
+      "widthPercent": 0.44949297255744597,
+      "heightPercent": 0.16302799530595627,
+      "rotation": 0,
+      "zIndex": 2
+    },
+    {
+      "asset": "splash_screen_icon_balloon",
+      "xPercent": 0.22167738189999273,
+      "yPercent": 0.18213970960625006,
+      "widthPercent": 0.3,
+      "heightPercent": 0.12,
+      "rotation": 0,
+      "zIndex": 3
+    },
+    {
+      "asset": "splash_screen_loading_bar",
+      "xPercent": 0.18771876999510692,
+      "yPercent": 0.4441100817043547,
+      "widthPercent": 0.3424695944765462,
+      "heightPercent": 0.019601344286102534,
+      "rotation": 0,
+      "zIndex": 4
+    }
+  ]
+}

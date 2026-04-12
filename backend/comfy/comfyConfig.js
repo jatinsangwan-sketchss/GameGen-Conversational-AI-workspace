@@ -15,7 +15,7 @@ export const COMFY_OUTPUT_DIR =
   process.env.COMFY_OUTPUT_DIR ||
   "/Users/jatin.sangwan/Documents/ComfyUI/output"
 
-export const POLL_INTERVAL = 1000
+export const POLL_INTERVAL = 10000
 export const MAX_WAIT_TIME = 120000
 
 /**

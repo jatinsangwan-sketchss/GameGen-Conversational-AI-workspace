@@ -1,0 +1,58 @@
+{
+  "elements": [
+    {
+      "asset": "main_menu_menu_background",
+      "xPercent": -0.0008746689413495029,
+      "yPercent": 0.00046115961846869064,
+      "widthPercent": 0.7195995934282864,
+      "heightPercent": 0.7185672235895235,
+      "rotation": 0,
+      "zIndex": 1
+    },
+    {
+      "asset": "main_menu_game_title_text",
+      "xPercent": 0.08919784264769362,
+      "yPercent": 0.05592763469664571,
+      "widthPercent": 0.527637026394293,
+      "heightPercent": 0.12,
+      "rotation": 0,
+      "zIndex": 2
+    },
+    {
+      "asset": "main_menu_btn_settings_button_container_container",
+      "xPercent": 0.13326478682720905,
+      "yPercent": 0.5435408546240398,
+      "widthPercent": 0.20996445970972008,
+      "heightPercent": 0.10948204559187642,
+      "rotation": 0,
+      "zIndex": 3
+    },
+    {
+      "asset": "main_menu_settings_button_icon",
+      "xPercent": 0.16725468213874062,
+      "yPercent": 0.5540574735485858,
+      "widthPercent": 0.14541067610536812,
+      "heightPercent": 0.07888436004097528,
+      "rotation": 0,
+      "zIndex": 4
+    },
+    {
+      "asset": "main_menu_icon_settings_gear",
+      "xPercent": 0.16389029395130145,
+      "yPercent": 0.555010744581328,
+      "widthPercent": 0.1556033787797386,
+      "heightPercent": 0.08175289306137323,
+      "rotation": 0,
+      "zIndex": 5
+    },
+    {
+      "asset": "main_menu_btn_play_shell",
+      "xPercent": 0.09768607365088566,
+      "yPercent": 0.2614865092588555,
+      "widthPercent": 0.5412272966267881,
+      "heightPercent": 0.11999999999999983,
+      "rotation": 0,
+      "zIndex": 6
+    }
+  ]
+}

@@ -2,7 +2,10 @@
 import { useState, useRef, useEffect } from 'react'
 import { NexverseLogo, nexverseFont } from './Logo'
 import LayoutWorkspace from './components/LayoutWorkspace'
+import GameBuildPanel from './components/GameBuildPanel'
 import { API_BASE_URL } from './config/api.config'
+import { generateBlueprint, startGameBuild } from './api/gameBuildApi'
+import { commitDraft, regenerateDraft } from './api/draftAssetsApi'
 
 // Color theme constants
 const colors = {
@@ -201,10 +204,18 @@ export default function App() {
   const [assets, setAssets] = useState({})
   const [layoutByScreen, setLayoutByScreen] = useState({})
   const [designContext, setDesignContext] = useState(null)
+  const [workspaceMode, setWorkspaceMode] = useState('layout')
+  const [gameBlueprint, setGameBlueprint] = useState(null)
+  const [pendingBuild, setPendingBuild] = useState(null)
+  const [isStartingBuild, setIsStartingBuild] = useState(false)
   const [saveNotice, setSaveNotice] = useState('')
   const saveNoticeTimer = useRef(null)
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [draftAssets, setDraftAssets] = useState({})
+  const [summaryLine, setSummaryLine] = useState('')
+  const summaryEventRef = useRef(null)
+  const [approvingDraftIds, setApprovingDraftIds] = useState({})
   const messagesEndRef = useRef(null)
   const chatContainerRef = useRef(null)
   const persistTimerRef = useRef(null)
@@ -235,6 +246,15 @@ export default function App() {
     if (typeof snapshot.designContext === 'string') {
       setDesignContext(snapshot.designContext)
     }
+    if (snapshot.draftAssets && typeof snapshot.draftAssets === 'object') {
+      setDraftAssets(snapshot.draftAssets)
+    }
+    if (typeof snapshot.workspaceMode === 'string') {
+      setWorkspaceMode(snapshot.workspaceMode)
+    }
+    if (snapshot.gameBlueprint && typeof snapshot.gameBlueprint === 'object') {
+      setGameBlueprint(snapshot.gameBlueprint)
+    }
   }, [])
 
   useEffect(() => {
@@ -247,7 +267,10 @@ export default function App() {
         screens,
         assets,
         layoutByScreen,
-        designContext
+        designContext,
+        workspaceMode,
+        gameBlueprint,
+        draftAssets
       })
     }, 300)
 
@@ -257,6 +280,27 @@ export default function App() {
       }
     }
   }, [messages, screens, assets, layoutByScreen, designContext])
+
+  useEffect(() => {
+    const url = `${API_BASE_URL}/api/assets/summary/stream?sessionId=default`
+    const source = new EventSource(url)
+    summaryEventRef.current = source
+    source.addEventListener('summary', (event) => {
+      try {
+        const payload = JSON.parse(event.data)
+        if (payload?.chunk) {
+          setSummaryLine(payload.chunk)
+          if (payload.final) {
+            setMessages((m) => [...m, { role: 'assistant', content: payload.chunk }])
+            setSummaryLine('')
+          }
+        }
+      } catch {
+        // ignore
+      }
+    })
+    return () => source.close()
+  }, [])
 
   async function sendMessage() {
     if (!input.trim() || loading) return
@@ -269,6 +313,23 @@ export default function App() {
     setMessages(m => [...m, { role: 'user', content: userMessage }])
 
     try {
+      if (workspaceMode === 'game-build') {
+        setMessages(m => [...m, { role: 'assistant', content: 'Analyzing game PRD...' }])
+        const response = await generateBlueprint({ prdText: userMessage, sessionId: 'default' })
+        const blueprint = response?.blueprint || response
+        setGameBlueprint(blueprint)
+        setPendingBuild({ prdText: userMessage, blueprint })
+        setMessages(m => [
+          ...m,
+          {
+            role: 'assistant',
+            type: 'build_prompt',
+            content: 'Blueprint ready. Start build?'
+          }
+        ])
+        return
+      }
+
       const res = await fetch(`${API_BASE_URL}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -293,6 +354,10 @@ export default function App() {
       if (data.assets && typeof data.assets === 'object') {
         setAssets(data.assets)
       }
+      if (data.draftAssets && typeof data.draftAssets === 'object') {
+        console.log('[draftAssets] received', data.draftAssets)
+        setDraftAssets(data.draftAssets)
+      }
       if (typeof data.designContext === 'string') {
         setDesignContext(data.designContext)
       }
@@ -305,6 +370,26 @@ export default function App() {
     } finally {
       setLoading(false)
     }
+  }
+
+  async function handleConfirmBuild() {
+    if (!pendingBuild || isStartingBuild) return
+    setIsStartingBuild(true)
+    try {
+      await startGameBuild({ sessionId: 'default', blueprint: pendingBuild.blueprint })
+      setMessages(m => [...m, { role: 'assistant', content: 'Build started. Streaming logs on the right.' }])
+      setPendingBuild(null)
+    } catch (error) {
+      console.error('Error starting build:', error)
+      setMessages(m => [...m, { role: 'assistant', content: 'Failed to start build. Please try again.' }])
+    } finally {
+      setIsStartingBuild(false)
+    }
+  }
+
+  function handleCancelBuild() {
+    setPendingBuild(null)
+    setMessages(m => [...m, { role: 'assistant', content: 'Build cancelled. Send a new PRD when ready.' }])
   }
 
   function handleAnnotationLog({ assetName, instruction }) {
@@ -325,12 +410,58 @@ export default function App() {
     setAssets({})
     setDesignContext(null)
     setLayoutByScreen({})
+    setDraftAssets({})
+    setGameBlueprint(null)
+    setPendingBuild(null)
+    setWorkspaceMode('layout')
     window.localStorage.removeItem(WORKSPACE_STORAGE_KEY)
     fetch(`${API_BASE_URL}/api/chat/clear`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId: 'default' })
     }).catch(console.error)
+  }
+
+  async function handleApproveDraft(draft) {
+    if (approvingDraftIds[draft.id]) return
+    setApprovingDraftIds((prev) => ({ ...prev, [draft.id]: true }))
+    const screenName = draft.screenName
+    const assetMeta = {
+      id: draft.id.replace(/_draft$/, ""),
+      type: draft?.componentSpec?.type || 'asset',
+      label: draft?.componentSpec?.label || null
+    }
+    const res = await commitDraft({
+      screenName,
+      draftId: draft.id,
+      assetMeta,
+      sessionId: 'default'
+    })
+    if (res?.assets) {
+      setAssets(res.assets)
+      setDraftAssets((prev) => ({
+        ...prev,
+        [screenName]: (prev[screenName] || []).filter((item) => item.id !== draft.id)
+      }))
+    }
+    setApprovingDraftIds((prev) => {
+      const next = { ...prev }
+      delete next[draft.id]
+      return next
+    })
+  }
+
+  async function handleRegenerateDraft(draft) {
+    const screenName = draft.screenName
+    const instructions = window.prompt('Regenerate instructions', '') || ''
+    const res = await regenerateDraft({
+      screenName,
+      instructions,
+      sessionId: 'default'
+    })
+    if (res?.draftAssets) {
+      setDraftAssets(res.draftAssets)
+    }
   }
 
   function handleLayoutSaved(message) {
@@ -453,26 +584,98 @@ export default function App() {
               </div>
             </div>
           )}
-          {messages.map((m, i) => (
-            <div 
-              key={i} 
-              style={{
-                alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
-                maxWidth: '80%',
-                padding: '12px 16px',
-                borderRadius: '12px',
-                backgroundColor: m.role === 'user' ? colors.accentBlue : colors.surfaceElevated,
-                color: m.role === 'user' ? '#fff' : colors.text,
-                border: m.role === 'assistant' ? `1px solid ${colors.border}` : 'none',
-                boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
-                fontSize: '14px',
-                lineHeight: '1.5',
-                fontFamily: nexverseFont
-              }}
-            >
-              {m.content}
+          {messages.map((m, i) => {
+            if (m.type === 'build_prompt') {
+              return (
+                <div
+                  key={i}
+                  style={{
+                    alignSelf: 'flex-start',
+                    maxWidth: '85%',
+                    padding: '12px 16px',
+                    borderRadius: '12px',
+                    backgroundColor: colors.surfaceElevated,
+                    color: colors.text,
+                    border: `1px solid ${colors.border}`,
+                    boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+                    fontSize: '14px',
+                    lineHeight: '1.5',
+                    fontFamily: nexverseFont
+                  }}
+                >
+                  <div style={{ marginBottom: '10px' }}>{m.content}</div>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button
+                      onClick={handleConfirmBuild}
+                      disabled={isStartingBuild}
+                      style={{
+                        padding: '8px 12px',
+                        borderRadius: '8px',
+                        border: 'none',
+                        background: isStartingBuild ? colors.textMuted : colors.accentBlue,
+                        color: '#fff',
+                        fontWeight: 600,
+                        cursor: isStartingBuild ? 'not-allowed' : 'pointer'
+                      }}
+                    >
+                      ✅ Build
+                    </button>
+                    <button
+                      onClick={handleCancelBuild}
+                      disabled={isStartingBuild}
+                      style={{
+                        padding: '8px 12px',
+                        borderRadius: '8px',
+                        border: `1px solid ${colors.border}`,
+                        background: colors.surface,
+                        color: colors.textSecondary,
+                        fontWeight: 600,
+                        cursor: isStartingBuild ? 'not-allowed' : 'pointer'
+                      }}
+                    >
+                      ❌ Cancel
+                    </button>
+                  </div>
+                </div>
+              )
+            }
+
+            return (
+              <div 
+                key={i} 
+                style={{
+                  alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
+                  maxWidth: '80%',
+                  padding: '12px 16px',
+                  borderRadius: '12px',
+                  backgroundColor: m.role === 'user' ? colors.accentBlue : colors.surfaceElevated,
+                  color: m.role === 'user' ? '#fff' : colors.text,
+                  border: m.role === 'assistant' ? `1px solid ${colors.border}` : 'none',
+                  boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+                  fontSize: '14px',
+                  lineHeight: '1.5',
+                  fontFamily: nexverseFont
+                }}
+              >
+                {m.content}
+              </div>
+            )
+          })}
+          {summaryLine && (
+            <div style={{
+              alignSelf: 'flex-start',
+              maxWidth: '80%',
+              padding: '10px 14px',
+              borderRadius: '10px',
+              backgroundColor: '#0f172a',
+              color: '#cbd5f5',
+              border: `1px solid ${colors.border}`,
+              fontSize: '12px',
+              fontFamily: nexverseFont
+            }}>
+              {summaryLine}
             </div>
-          ))}
+          )}
           {loading && (
             <div style={{
               alignSelf: 'flex-start',
@@ -578,9 +781,9 @@ export default function App() {
               fontFamily: nexverseFont,
               textTransform: 'uppercase'
             }}>
-              Layout Workspace
+              {workspaceMode === 'game-build' ? 'Game Build Mode' : 'Layout Workspace'}
             </h3>
-            {screens.length > 0 && (
+            {workspaceMode !== 'game-build' && screens.length > 0 && (
               <div style={{ 
                 fontSize: '0.75em', 
                 color: colors.textMuted, 
@@ -605,6 +808,39 @@ export default function App() {
               {saveNotice}
             </div>
           )}
+          {workspaceMode !== 'game-build' ? (
+            <button
+              onClick={() => setWorkspaceMode('game-build')}
+              style={{
+                marginLeft: '12px',
+                padding: '8px 12px',
+                borderRadius: '8px',
+                border: `1px solid ${colors.border}`,
+                background: '#0f172a',
+                color: '#f8fafc',
+                fontWeight: 600,
+                cursor: 'pointer'
+              }}
+            >
+              🚀 Enter Game Build Mode
+            </button>
+          ) : (
+            <button
+              onClick={() => setWorkspaceMode('layout')}
+              style={{
+                marginLeft: '12px',
+                padding: '8px 12px',
+                borderRadius: '8px',
+                border: `1px solid ${colors.border}`,
+                background: colors.surface,
+                color: colors.textSecondary,
+                fontWeight: 600,
+                cursor: 'pointer'
+              }}
+            >
+              Exit Game Build Mode
+            </button>
+          )}
         </div>
         
         <div style={{ 
@@ -618,7 +854,9 @@ export default function App() {
               <WorkspaceGeneratingCard />
             </div>
           )}
-          {screens.length === 0 && Object.keys(assets).length === 0 ? (
+          {workspaceMode === 'game-build' ? (
+            <GameBuildPanel sessionId="default" blueprint={gameBlueprint} />
+          ) : screens.length === 0 && Object.keys(assets).length === 0 ? (
             <div style={{ 
               color: colors.textSecondary, 
               textAlign: 'center', 
@@ -657,6 +895,10 @@ export default function App() {
               onSaved={handleLayoutSaved}
               designContext={designContext}
               onAnnotationLog={handleAnnotationLog}
+              draftAssets={draftAssets}
+              onApproveDraft={handleApproveDraft}
+              onRegenerateDraft={handleRegenerateDraft}
+              approvingDraftIds={approvingDraftIds}
             />
           )}
         </div>
