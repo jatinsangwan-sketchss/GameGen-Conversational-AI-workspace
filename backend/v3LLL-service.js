@@ -7,8 +7,10 @@ import { generateScreenImages } from "./services/generation/ScreenImageGenerator
 import { stripLayoutFromScreens } from "./services/generation/LayoutGenerator.js"
 import { classifyIntent as classifyIntentService } from "./services/extraction/IntentClassifier.js"
 import { extractDesignContext as extractDesignContextService } from "./services/extraction/DesignContextExtractor.js"
+import { extractDesignTokens as extractDesignTokensService } from "./services/extraction/DesignTokenExtractor.js"
 import { extractScreensFromPRD as extractScreensFromPRDService } from "./services/extraction/ScreenExtractor.js"
 import { extractGameNameFromPRD as extractGameNameFromPRDService } from "./services/extraction/GameNameExtractor.js"
+import { createDraftFromMessage } from "./services/generation/DraftAssetService.js"
 
 
 dotenv.config()
@@ -119,7 +121,8 @@ const openai = new OpenAI({
 
 export async function callAgent(message, sessionId) {
   const session = getSession(sessionId)
-  const safeMessage = typeof message === "string" ? message : ""
+  const safeMessage = typeof message === "string" ? message : "";
+  // intent classification
   const { intent } = await classifyIntentService({
     openai,
     message: safeMessage,
@@ -138,6 +141,11 @@ export async function callAgent(message, sessionId) {
   /* -------- NEW PRD -------- */
   if (intent === "NEW_PRD") {
     const designContext = await extractDesignContextService({ openai, prdText: safeMessage })
+    const designTokens = await extractDesignTokensService({
+      openai,
+      prdText: safeMessage,
+      designContext
+    })
     const { screens } = await extractScreensFromPRDService({ openai, prdText: safeMessage })
     const gameName = await extractGameNameFromPRDService({ openai, prdText: safeMessage })
     const screensWithImages = await generateScreenImages({
@@ -148,18 +156,19 @@ export async function callAgent(message, sessionId) {
     })
 
     session.designContext = designContext
+    session.designTokens = designTokens
     session.originalPRD = safeMessage
     session.screensMetadata = screensWithImages
     session.gameName = gameName
     session.lastExtractionAt = new Date().toISOString()
 
     console.log("this is the design context::::", designContext)
+    console.log("design tokens::::", designTokens)
     console.log("extractScreensFromPRD:::::", screensWithImages)
     console.log("GameName:::::", gameName)
     console.log("[session] lastExtractionAt:", session.lastExtractionAt)
 
-    // I can call an LLM to provide a human like repsonse stream = true
-    // Asset-first generationx
+    // Asset-first generation
     const { assets, screens: screensWithImagesAndAssets } =
       await generateAssetsForSession({ openai, session, runComfyBatchTrim: runBatchTrim })
 
@@ -176,8 +185,14 @@ export async function callAgent(message, sessionId) {
       openai,
       prdText: session.designContext + "\nUser update:\n" + safeMessage
     })
+    const updatedTokens = await extractDesignTokensService({
+      openai,
+      prdText: session.originalPRD || safeMessage,
+      designContext: updatedContext
+    })
 
     session.designContext = updatedContext
+    session.designTokens = updatedTokens
     session.lastExtractionAt = new Date().toISOString()
 
     const screensWithImages = await generateScreenImages({
@@ -198,24 +213,18 @@ export async function callAgent(message, sessionId) {
     }
   }
 
-  /* -------- REGENERATE ALL -------- */
-  if (intent === "REGENERATE_ALL" && session.designContext) {
-    const screensWithImages = await generateScreenImages({
+  /* -------- ADD COMPONENT -------- */
+  if (intent === "ADD_COMPONENT" && session.designContext) {
+    const result = await createDraftFromMessage({
       openai,
-      screens: stripLayoutFromScreens(session.screensMetadata),
-      designContext: session.designContext,
-      gameName: session.gameName || "game_ui"
+      session: { ...session, sessionId },
+      userMessage: safeMessage
     })
-    session.screensMetadata = screensWithImages
-    session.lastExtractionAt = new Date().toISOString()
-
-    const { assets, screens: screensWithImagesAndAssets } =
-      await generateAssetsForSession({ openai, session, runComfyBatchTrim: runBatchTrim })
 
     return {
-      chat: "Regenerated screens and assets using updated design system.",
-      screens: screensWithImagesAndAssets,
-      assets
+      chat: "Draft asset generated. Review it in the workspace.",
+      draftAssets: session.draftAssets || {},
+      screen: result.screen?.name || null
     }
   }
 

@@ -5,6 +5,7 @@ import LayoutWorkspace from './components/LayoutWorkspace'
 import GameBuildPanel from './components/GameBuildPanel'
 import { API_BASE_URL } from './config/api.config'
 import { generateBlueprint, startGameBuild } from './api/gameBuildApi'
+import { commitDraft, regenerateDraft } from './api/draftAssetsApi'
 
 // Color theme constants
 const colors = {
@@ -211,6 +212,10 @@ export default function App() {
   const saveNoticeTimer = useRef(null)
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [draftAssets, setDraftAssets] = useState({})
+  const [summaryLine, setSummaryLine] = useState('')
+  const summaryEventRef = useRef(null)
+  const [approvingDraftIds, setApprovingDraftIds] = useState({})
   const messagesEndRef = useRef(null)
   const chatContainerRef = useRef(null)
   const persistTimerRef = useRef(null)
@@ -241,6 +246,9 @@ export default function App() {
     if (typeof snapshot.designContext === 'string') {
       setDesignContext(snapshot.designContext)
     }
+    if (snapshot.draftAssets && typeof snapshot.draftAssets === 'object') {
+      setDraftAssets(snapshot.draftAssets)
+    }
     if (typeof snapshot.workspaceMode === 'string') {
       setWorkspaceMode(snapshot.workspaceMode)
     }
@@ -261,7 +269,8 @@ export default function App() {
         layoutByScreen,
         designContext,
         workspaceMode,
-        gameBlueprint
+        gameBlueprint,
+        draftAssets
       })
     }, 300)
 
@@ -271,6 +280,27 @@ export default function App() {
       }
     }
   }, [messages, screens, assets, layoutByScreen, designContext])
+
+  useEffect(() => {
+    const url = `${API_BASE_URL}/api/assets/summary/stream?sessionId=default`
+    const source = new EventSource(url)
+    summaryEventRef.current = source
+    source.addEventListener('summary', (event) => {
+      try {
+        const payload = JSON.parse(event.data)
+        if (payload?.chunk) {
+          setSummaryLine(payload.chunk)
+          if (payload.final) {
+            setMessages((m) => [...m, { role: 'assistant', content: payload.chunk }])
+            setSummaryLine('')
+          }
+        }
+      } catch {
+        // ignore
+      }
+    })
+    return () => source.close()
+  }, [])
 
   async function sendMessage() {
     if (!input.trim() || loading) return
@@ -324,6 +354,10 @@ export default function App() {
       if (data.assets && typeof data.assets === 'object') {
         setAssets(data.assets)
       }
+      if (data.draftAssets && typeof data.draftAssets === 'object') {
+        console.log('[draftAssets] received', data.draftAssets)
+        setDraftAssets(data.draftAssets)
+      }
       if (typeof data.designContext === 'string') {
         setDesignContext(data.designContext)
       }
@@ -376,6 +410,7 @@ export default function App() {
     setAssets({})
     setDesignContext(null)
     setLayoutByScreen({})
+    setDraftAssets({})
     setGameBlueprint(null)
     setPendingBuild(null)
     setWorkspaceMode('layout')
@@ -385,6 +420,48 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId: 'default' })
     }).catch(console.error)
+  }
+
+  async function handleApproveDraft(draft) {
+    if (approvingDraftIds[draft.id]) return
+    setApprovingDraftIds((prev) => ({ ...prev, [draft.id]: true }))
+    const screenName = draft.screenName
+    const assetMeta = {
+      id: draft.id.replace(/_draft$/, ""),
+      type: draft?.componentSpec?.type || 'asset',
+      label: draft?.componentSpec?.label || null
+    }
+    const res = await commitDraft({
+      screenName,
+      draftId: draft.id,
+      assetMeta,
+      sessionId: 'default'
+    })
+    if (res?.assets) {
+      setAssets(res.assets)
+      setDraftAssets((prev) => ({
+        ...prev,
+        [screenName]: (prev[screenName] || []).filter((item) => item.id !== draft.id)
+      }))
+    }
+    setApprovingDraftIds((prev) => {
+      const next = { ...prev }
+      delete next[draft.id]
+      return next
+    })
+  }
+
+  async function handleRegenerateDraft(draft) {
+    const screenName = draft.screenName
+    const instructions = window.prompt('Regenerate instructions', '') || ''
+    const res = await regenerateDraft({
+      screenName,
+      instructions,
+      sessionId: 'default'
+    })
+    if (res?.draftAssets) {
+      setDraftAssets(res.draftAssets)
+    }
   }
 
   function handleLayoutSaved(message) {
@@ -584,6 +661,21 @@ export default function App() {
               </div>
             )
           })}
+          {summaryLine && (
+            <div style={{
+              alignSelf: 'flex-start',
+              maxWidth: '80%',
+              padding: '10px 14px',
+              borderRadius: '10px',
+              backgroundColor: '#0f172a',
+              color: '#cbd5f5',
+              border: `1px solid ${colors.border}`,
+              fontSize: '12px',
+              fontFamily: nexverseFont
+            }}>
+              {summaryLine}
+            </div>
+          )}
           {loading && (
             <div style={{
               alignSelf: 'flex-start',
@@ -803,6 +895,10 @@ export default function App() {
               onSaved={handleLayoutSaved}
               designContext={designContext}
               onAnnotationLog={handleAnnotationLog}
+              draftAssets={draftAssets}
+              onApproveDraft={handleApproveDraft}
+              onRegenerateDraft={handleRegenerateDraft}
+              approvingDraftIds={approvingDraftIds}
             />
           )}
         </div>

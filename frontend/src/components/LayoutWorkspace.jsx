@@ -3,6 +3,7 @@ import AssetShelf from './AssetShelf'
 import LayoutCanvas from './LayoutCanvas'
 import { saveLayout } from '../api/layoutApi'
 import { editAsset as editAssetApi } from '../api/editAssetApi'
+import { buildAssetUrl } from '../utils/assetUtils'
 
 const layoutColors = {
   panel: '#111111',
@@ -25,7 +26,11 @@ export default function LayoutWorkspace({
   setLayoutByScreen,
   onSaved,
   designContext,
-  onAnnotationLog
+  onAnnotationLog,
+  draftAssets = {},
+  onApproveDraft,
+  onRegenerateDraft,
+  approvingDraftIds = {}
 }) {
   const containerRef = useRef(null)
   const [canvasSize, setCanvasSize] = useState({ width: 375, height: 666 })
@@ -79,6 +84,15 @@ export default function LayoutWorkspace({
   const screenAssets = useMemo(() => {
     return selectedScreenName ? assets[selectedScreenName] || [] : []
   }, [assets, selectedScreenName])
+
+  const screenDrafts = useMemo(() => {
+    return selectedScreenName ? draftAssets[selectedScreenName] || [] : []
+  }, [draftAssets, selectedScreenName])
+
+  useEffect(() => {
+    console.log('[draftAssets] selected screen', selectedScreenName)
+    console.log('[draftAssets] drafts count', screenDrafts.length)
+  }, [selectedScreenName, screenDrafts.length])
 
   const elements = layoutByScreen?.[selectedScreenName]?.elements || []
   const selectedElement = selectedAsset
@@ -295,7 +309,7 @@ export default function LayoutWorkspace({
         overflowY: 'auto'
       }}>
         <div style={{ marginBottom: '12px', color: '#fff', fontSize: '14px' }}>
-          Assets
+          Workspace
         </div>
         <div style={{ marginBottom: '12px' }}>
           <select
@@ -316,6 +330,69 @@ export default function LayoutWorkspace({
               </option>
             ))}
           </select>
+        </div>
+        {screenDrafts.length > 0 && (
+          <div style={{ marginBottom: '16px' }}>
+            <div style={{ color: '#cbd5f5', fontSize: '12px', marginBottom: '8px' }}>
+              Draft Assets (awaiting approval)
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {screenDrafts.map((draft) => (
+                <div key={draft.id} style={{
+                  border: `1px solid ${layoutColors.border}`,
+                  borderRadius: '10px',
+                  padding: '10px',
+                  background: '#151515'
+                }}>
+                  <div style={{ fontSize: '12px', color: '#e5e7eb', marginBottom: '8px' }}>
+                    {draft.fileName}
+                  </div>
+                  <img
+                    src={buildAssetUrl(draft.path)}
+                    alt={draft.fileName}
+                    style={{ width: '100%', borderRadius: '8px', background: '#0b0b0b' }}
+                  />
+                  <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+                    <button
+                      onClick={() => onApproveDraft?.(draft)}
+                      disabled={approvingDraftIds[draft.id]}
+                      style={{
+                        flex: 1,
+                        padding: '8px',
+                        borderRadius: '8px',
+                        border: 'none',
+                        background: approvingDraftIds[draft.id] ? '#475569' : '#3b82f6',
+                        color: '#fff',
+                        fontWeight: 600,
+                        cursor: approvingDraftIds[draft.id] ? 'not-allowed' : 'pointer'
+                      }}
+                    >
+                      {approvingDraftIds[draft.id] ? 'Approving…' : 'Approve'}
+                    </button>
+                    <button
+                      onClick={() => onRegenerateDraft?.(draft)}
+                      style={{
+                        flex: 1,
+                        padding: '8px',
+                        borderRadius: '8px',
+                        border: `1px solid ${layoutColors.border}`,
+                        background: '#0f172a',
+                        color: '#cbd5f5',
+                        fontWeight: 600,
+                        cursor: 'pointer'
+                      }}
+                    >
+                      Regenerate
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div style={{ color: '#cbd5f5', fontSize: '12px', marginBottom: '8px' }}>
+          Asset Shelf
         </div>
         <AssetShelf
           assets={screenAssets}

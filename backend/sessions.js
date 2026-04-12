@@ -19,6 +19,14 @@ export function deleteSession(sessionId) {
 // Session shape:
 // {
 //   designContext: string | null,
+//  ----- For conversational new asset generation ------
+//   designTokens: {
+//     borderRadius: number,
+//     accentColor: string,
+//     buttonHeight: number,
+//     glowStyle: string,
+//     shadowStyle: string
+//   } | null,
 //   originalPRD: string | null,
 //   screensMetadata: [
 //     {
@@ -44,6 +52,7 @@ export function deleteSession(sessionId) {
 //     }
 //   ],
 //   assets: { [screenName: string]: array },
+//   draftAssets: { [screenName: string]: array },
 //   gameName: string | null,
 //   lastExtractionAt: string | null,
 //   lastAssetGenerationAt: string | null

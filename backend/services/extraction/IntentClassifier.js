@@ -5,13 +5,13 @@ export async function classifyIntent({ openai, message, session }) {
   const safeMessage = typeof message === "string" ? message : ""
 
   const systemPrompt = `
-You are an intent classifier for a conversational UI design system.
+You are an intent classifier for a conversational UI asset generation system and you are provided with human messages, provide me with the
+correct intent from the available intents
 
 Available intents:
 - NEW_PRD
-- ADD_SCREEN
+- ADD_COMPONENT
 - UPDATE_DESIGN
-- REGENERATE_ALL
 - SMALL_TALK
 - UNKNOWN
 
@@ -21,17 +21,15 @@ hasExistingScreens: ${hasExistingScreens}
 Context Rules:
 
 1. If there are NO existing screens and user provides structured UI description → NEW_PRD.
-2. If there ARE existing screens and user says "add" one new screen → ADD_SCREEN.
-3. If user says change theme, color, style → UPDATE_DESIGN.
-4. If user says regenerate screens → REGENERATE_ALL.
-5. If user asks to generate or export assets, PNGs, sprites, UI assets → GENERATE_ASSETS.
-6. Greetings or irrelevant text → SMALL_TALK.
-7. Otherwise → UNKNOWN.
+2. If user says change theme, color, style → UPDATE_DESIGN.
+3. If user asks to add a button/icon/component to an existing screen → ADD_COMPONENT.
+4. Greetings or irrelevant text → SMALL_TALK.
+5. Otherwise → UNKNOWN.
 
 
 Return ONLY valid JSON:
 {
-  "intent": "NEW_PRD | ADD_SCREEN | UPDATE_DESIGN | REGENERATE_ALL | GENERATE_ASSETS | SMALL_TALK | UNKNOWN"
+  "intent": "NEW_PRD | ADD_COMPONENT | UPDATE_DESIGN | SMALL_TALK | UNKNOWN"
 }
 `
   

@@ -1,6 +1,7 @@
 import { TEXT_MODEL } from "../../config/openai.config.js"
 
 export function stripLayoutFromScreens(screens) {
+  console.log("[stripLayoutFromScreens] input screens:", (screens || []).length)
   return (screens || []).map((screen) => ({
     name: screen.name,
     description: screen.description,
@@ -14,6 +15,9 @@ export function stripLayoutFromScreens(screens) {
 }
 
 export async function generateLayoutFromTrimmedAssets({ openai, session }) {
+  console.log("[generateLayoutFromTrimmedAssets] start", {
+    screens: session?.screensMetadata?.length || 0
+  })
   const systemPrompt = `
 You are a production-level mobile game UI layout engine.
 
