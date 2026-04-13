@@ -159,6 +159,12 @@ function isLikelyMutationToolName(toolName) {
   return /\b(set|add|create|new|update|modify|edit|patch|delete|remove|attach|assign|link|save|write|duplicate|reparent)\b/.test(t);
 }
 
+function isLikelyAdditiveMutationToolName(toolName) {
+  const t = safeString(toolName).trim().toLowerCase();
+  if (!t) return false;
+  return /\b(add|create|new|duplicate)\b/.test(t);
+}
+
 function tokenizeIdentity(value) {
   return (safeString(value).toLowerCase().match(/[a-z0-9]+/g) ?? []).filter(Boolean);
 }
@@ -361,6 +367,57 @@ export class Executor {
           },
         };
       }
+      const preIdempotency = this._evaluatePreMutationIdempotency({
+        toolName,
+        mutationArgs: toArgs(args),
+        preRaw: preMutationReadback.raw,
+      });
+      if (preIdempotency.skipExecution) {
+        return {
+          ok: true,
+          tool: toolName,
+          args: toArgs(args),
+          rawResult: preMutationReadback.raw,
+          error: null,
+          outcome: safeString(preIdempotency.outcome).trim() || "already_satisfied",
+          outcomeReason: safeString(preIdempotency.reason).trim() || "already_satisfied",
+          verification: {
+            readback: {
+              enabled: true,
+              readTool: safeString(genericReadbackPlan.readTool?.name).trim() || null,
+              preOk: true,
+              postOk: true,
+              readArgs: isPlainObject(genericReadbackPlan.readArgs) ? genericReadbackPlan.readArgs : null,
+              skippedMutation: true,
+            },
+          },
+        };
+      }
+      if (preIdempotency.failExecution) {
+        const outcomeReason = safeString(preIdempotency.reason).trim() || "precheck_conflict";
+        const missingIdentity = outcomeReason.startsWith("precheck_identity_unavailable:");
+        return {
+          ok: false,
+          tool: toolName,
+          args: toArgs(args),
+          rawResult: preMutationReadback.raw,
+          error: missingIdentity
+            ? `Mutation blocked by pre-check: additive identity missing required field(s): ${outcomeReason.slice("precheck_identity_unavailable:".length)}.`
+            : "Mutation blocked by pre-check: node name already exists with different parent/type.",
+          outcome: safeString(preIdempotency.outcome).trim() || "precheck_conflict",
+          outcomeReason,
+          verification: {
+            readback: {
+              enabled: true,
+              readTool: safeString(genericReadbackPlan.readTool?.name).trim() || null,
+              preOk: true,
+              postOk: null,
+              readArgs: isPlainObject(genericReadbackPlan.readArgs) ? genericReadbackPlan.readArgs : null,
+              skippedMutation: true,
+            },
+          },
+        };
+      }
     }
     const verifyArgs = toArgs(args);
     const semanticState = isPlainObject(workflowState?.semanticState) ? workflowState.semanticState : {};
@@ -497,6 +554,8 @@ export class Executor {
       args: toArgs(args),
       rawResult,
       error,
+      outcome: safeString(genericReadbackVerification?.outcome).trim() || null,
+      outcomeReason: safeString(genericReadbackVerification?.reason).trim() || null,
       verification: {
         readback: {
           enabled: Boolean(genericReadbackPlan?.enabled),
@@ -938,6 +997,12 @@ export class Executor {
   }
 
   async _runGenericReadback({ client, readTool, readArgs, phase = "post" } = {}) {
+    if (this._debug && safeString(phase).trim().toLowerCase() === "pre") {
+      console.log("[generic-mcp][precheck-debug] readback-request", {
+        readTool: safeString(readTool?.name).trim() || null,
+        readArgs: isPlainObject(readArgs) ? readArgs : null,
+      });
+    }
     let verifyRaw = null;
     try {
       verifyRaw = await this._callTool(client, {
@@ -1039,6 +1104,428 @@ export class Executor {
     return expectedRoots.some((k) => merged.includes(k));
   }
 
+  _extractExpectedMutationProperties(args = {}) {
+    const a = toArgs(args);
+    const fromContainer =
+      parsePropertyContainer(a.properties) ||
+      parsePropertyContainer(a.propertyMap) ||
+      parsePropertyContainer(a.props) ||
+      null;
+    if (isPlainObject(fromContainer)) return fromContainer;
+
+    const singleKey = safeString(a.propertyName || a.property || a.key).trim();
+    if (!singleKey) return null;
+    const value =
+      a.propertyValue ??
+      a.value ??
+      a.newValue ??
+      a.targetValue ??
+      null;
+    if (value == null) return null;
+    return { [singleKey]: value };
+  }
+
+  _collectCandidatePropertyValues(root, targetKeys = new Set(), out = []) {
+    if (root == null) return out;
+    if (Array.isArray(root)) {
+      for (const item of root) this._collectCandidatePropertyValues(item, targetKeys, out);
+      return out;
+    }
+    if (!isPlainObject(root)) return out;
+    for (const [rawKey, value] of Object.entries(root)) {
+      const key = normalizeKey(rawKey);
+      if (targetKeys.has(key)) out.push(value);
+      this._collectCandidatePropertyValues(value, targetKeys, out);
+    }
+    return out;
+  }
+
+  _collectNormalizedStringTokens(value, out = new Set()) {
+    if (value == null) return out;
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      const text = safeString(value).trim().toLowerCase();
+      if (!text) return out;
+      for (const token of text.match(/[a-z0-9_.:/-]+/g) ?? []) {
+        if (token) out.add(token);
+      }
+      return out;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) this._collectNormalizedStringTokens(item, out);
+      return out;
+    }
+    if (isPlainObject(value)) {
+      for (const entry of Object.values(value)) this._collectNormalizedStringTokens(entry, out);
+      return out;
+    }
+    return out;
+  }
+
+  _normalizeNodeNameIdentity(value) {
+    const raw = safeString(value).trim();
+    if (!raw) return "";
+    const unwrapped = raw.replace(/^([`"'“”‘’])(.*)\1$/, "$2").trim();
+    return unwrapped || raw;
+  }
+
+  _buildAdditiveMutationIdentity({ mutationArgs = {} } = {}) {
+    const a = toArgs(mutationArgs);
+    const nodeName = pickFirstText([
+      a.nodeName,
+      a.childName,
+      a.newNodeName,
+      a.node_name,
+      a.child_name,
+      a.new_node_name,
+      a.name,
+      a.targetName,
+    ]);
+    const nodeType = pickFirstText([
+      a.nodeType,
+      a.type,
+      a.childType,
+      a.node_type,
+      a.child_type,
+      a.targetType,
+    ]);
+    const parentPath = pickFirstText([
+      a.parentPath,
+      a.parentNodePath,
+      a.parentNode,
+      a.parent,
+      a.parentRef,
+      a.targetNodeRef,
+      a.nodeRef,
+      a.targetNode,
+      a.nodePath,
+      a.targetNodePath,
+    ]);
+    const rawPath = pickFirstText([
+      a.path,
+      a.filePath,
+      a.scenePath,
+      a.resourcePath,
+    ]);
+    const basenameFromPath = normalizeRef(rawPath)?.split("/").pop() ?? "";
+    const nameFromPath = basenameFromPath.replace(/\.[a-z0-9]+$/i, "");
+    const identityTokens = new Set();
+    for (const token of this._collectNormalizedStringTokens([
+      nodeName,
+      nodeType,
+      parentPath,
+      nameFromPath,
+    ])) {
+      identityTokens.add(token);
+    }
+    return {
+      nodeName: this._normalizeNodeNameIdentity(nodeName) || null,
+      nodeType: safeString(nodeType).trim() || null,
+      parentPath: safeString(parentPath).trim() || null,
+      identityTokens,
+    };
+  }
+
+  _normalizeNodePathLike(value) {
+    const normalized = safeString(value).trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    if (normalized === ".") return "";
+    return normalized;
+  }
+
+  _parentFromNodePath(nodePath) {
+    const normalized = this._normalizeNodePathLike(nodePath);
+    if (!normalized) return "";
+    const idx = normalized.lastIndexOf("/");
+    if (idx < 0) return "";
+    return normalized.slice(0, idx);
+  }
+
+  _sceneRootNameFromArgs(mutationArgs = {}) {
+    const a = toArgs(mutationArgs);
+    const fromScene = pickFirstText([a.scenePath, a.sceneRef, a.path, a.filePath]);
+    const rel = normalizeRef(fromScene);
+    const leaf = rel ? rel.split("/").pop() ?? "" : "";
+    const stem = safeString(leaf).replace(/\.[a-z0-9]+$/i, "").trim();
+    return stem || null;
+  }
+
+  _parentPathsEquivalent({ expectedParent = "", actualParent = "", mutationArgs = {} } = {}) {
+    const e = this._normalizeNodePathLike(expectedParent);
+    const a = this._normalizeNodePathLike(actualParent);
+    if (e === a) return true;
+
+    // Some scene inspectors represent direct children of root as ""/"."
+    // while requests refer to root by scene/root node name.
+    const rootName = safeString(this._sceneRootNameFromArgs(mutationArgs)).trim().toLowerCase();
+    const eLeaf = safeString(e.split("/").pop() ?? "").trim().toLowerCase();
+    const aLeaf = safeString(a.split("/").pop() ?? "").trim().toLowerCase();
+    const eIsRootAlias = !e || e === "." || (rootName && eLeaf === rootName);
+    const aIsRootAlias = !a || a === "." || (rootName && aLeaf === rootName);
+    return eIsRootAlias && aIsRootAlias;
+  }
+
+  _extractNodeRecordsFromReadback(verifyRaw = null) {
+    const payloads = parseJsonLikeContentBlocks(verifyRaw);
+    const records = [];
+    const visit = (value) => {
+      if (value == null) return;
+      if (Array.isArray(value)) {
+        for (const item of value) visit(item);
+        return;
+      }
+      if (!isPlainObject(value)) return;
+      const name = safeString(value.name ?? value.node_name).trim();
+      const type = safeString(value.type ?? value.node_type).trim();
+      const nodePath = this._normalizeNodePathLike(value.path ?? value.node_path ?? "");
+      const explicitParent = this._normalizeNodePathLike(value.parentPath ?? value.parent_path ?? value.parent ?? "");
+      const parentPath = explicitParent || this._parentFromNodePath(nodePath);
+      if (name) {
+        records.push({
+          name,
+          type,
+          parentPath,
+          nodePath,
+        });
+      }
+      for (const nested of Object.values(value)) visit(nested);
+    };
+    for (const payload of payloads) visit(payload);
+    return records;
+  }
+
+  _nodeLeaf(value) {
+    const normalized = this._normalizeNodePathLike(value);
+    if (!normalized) return "";
+    const parts = normalized.split("/").filter(Boolean);
+    return safeString(parts[parts.length - 1] || "").trim();
+  }
+
+  _matchAdditiveIdentityInReadback({ verifyRaw = null, mutationArgs = {} } = {}) {
+    const identity = this._buildAdditiveMutationIdentity({ mutationArgs });
+    const expectedName = safeString(identity.nodeName).trim();
+    const expectedType = safeString(identity.nodeType).trim();
+    const expectedParentRaw = safeString(identity.parentPath).trim();
+    const expectedParent = this._normalizeNodePathLike(expectedParentRaw);
+    if (!expectedName || !expectedType || !expectedParentRaw) {
+      return { strictMatch: false, nameConflict: false };
+    }
+
+    const records = this._extractNodeRecordsFromReadback(verifyRaw);
+    if (this._debug) {
+      console.log("[generic-mcp][precheck-debug] readback-records", {
+        expected: {
+          name: expectedName || null,
+          type: expectedType || null,
+          parent: expectedParent || null,
+        },
+        recordCount: records.length,
+        sample: records.slice(0, 8).map((r) => ({
+          name: safeString(r?.name).trim() || null,
+          type: safeString(r?.type).trim() || null,
+          parent: safeString(r?.parentPath).trim() || null,
+          path: safeString(r?.nodePath).trim() || null,
+        })),
+      });
+    }
+    let strictMatch = false;
+    let nameConflict = false;
+    let sameNameCount = 0;
+    let sameNameByPathLeafCount = 0;
+    for (const record of records) {
+      const sameName = this._normalizeNodeNameIdentity(record?.name) === expectedName;
+      const sameNameByPathLeaf = this._normalizeNodeNameIdentity(this._nodeLeaf(record?.nodePath)) === expectedName;
+      if (sameNameByPathLeaf) sameNameByPathLeafCount += 1;
+      if (!sameName) continue;
+      sameNameCount += 1;
+      const sameType = safeString(record?.type).trim() === expectedType;
+      const sameParent = this._parentPathsEquivalent({
+        expectedParent,
+        actualParent: record?.parentPath,
+        mutationArgs,
+      });
+      if (sameType && sameParent) {
+        strictMatch = true;
+        break;
+      }
+      nameConflict = true;
+    }
+    if (this._debug) {
+      console.log("[generic-mcp][precheck-debug] match-analysis", {
+        expected: {
+          name: expectedName || null,
+          type: expectedType || null,
+          parent: expectedParent || null,
+        },
+        sameNameCount,
+        sameNameByPathLeafCount,
+        strictMatch,
+        nameConflict,
+      });
+    }
+    return { strictMatch, nameConflict };
+  }
+
+  _classifyNoEffectMutation({ toolName = "", mutationArgs = {}, rawResult = null, preRaw = null, postRaw = null } = {}) {
+    const unchanged = this._readbackFingerprint(preRaw) === this._readbackFingerprint(postRaw);
+    if (!unchanged) return { unchanged: false, alreadySatisfied: false };
+
+    if (isLikelyAdditiveMutationToolName(toolName)) {
+      const additiveMatch = this._matchAdditiveIdentityInReadback({
+        verifyRaw: preRaw,
+        mutationArgs,
+      });
+      if (additiveMatch.strictMatch) {
+        return { unchanged: true, alreadySatisfied: true, reason: "already_satisfied_entity_present" };
+      }
+      if (additiveMatch.nameConflict) {
+        return { unchanged: true, alreadySatisfied: false, reason: "name_conflict_existing_entity_mismatch" };
+      }
+      return { unchanged: true, alreadySatisfied: false, reason: "mutation_no_effect" };
+    }
+
+    const failureText = this.extractFailureText(rawResult);
+    if (isAlreadyExistsErrorText(failureText)) {
+      return { unchanged: true, alreadySatisfied: true, reason: "already_exists" };
+    }
+
+    const expectedInPre = this._postReadbackMatchesExpectedProperties({
+      mutationArgs,
+      postRaw: preRaw,
+    });
+    if (expectedInPre.constrained && expectedInPre.ok) {
+      return { unchanged: true, alreadySatisfied: true, reason: "already_satisfied_precondition" };
+    }
+
+    return { unchanged: true, alreadySatisfied: false, reason: "mutation_no_effect" };
+  }
+
+  _evaluatePreMutationIdempotency({ toolName = "", mutationArgs = {}, preRaw = null } = {}) {
+    if (!isLikelyAdditiveMutationToolName(toolName)) {
+      return { skipExecution: false, failExecution: false, reason: null, outcome: null };
+    }
+    const identity = this._buildAdditiveMutationIdentity({ mutationArgs });
+    if (this._debug) {
+      console.log("[generic-mcp][precheck-debug] identity", {
+        tool: toolName,
+        nodeName: safeString(identity?.nodeName).trim() || null,
+        nodeType: safeString(identity?.nodeType).trim() || null,
+        parentPath: safeString(identity?.parentPath).trim() || null,
+      });
+    }
+    const missingIdentityFields = [];
+    if (!safeString(identity.nodeName).trim()) missingIdentityFields.push("nodeName");
+    if (!safeString(identity.nodeType).trim()) missingIdentityFields.push("nodeType");
+    if (!safeString(identity.parentPath).trim()) missingIdentityFields.push("parentPath");
+    if (missingIdentityFields.length > 0) {
+      return {
+        skipExecution: false,
+        failExecution: true,
+        reason: `precheck_identity_unavailable:${missingIdentityFields.join(",")}`,
+        outcome: "precheck_conflict",
+      };
+    }
+    const additiveMatch = this._matchAdditiveIdentityInReadback({
+      verifyRaw: preRaw,
+      mutationArgs,
+    });
+    if (additiveMatch.strictMatch) {
+      return {
+        skipExecution: true,
+        failExecution: false,
+        reason: "already_satisfied_entity_present",
+        outcome: "already_satisfied",
+      };
+    }
+    if (additiveMatch.nameConflict) {
+      return {
+        skipExecution: false,
+        failExecution: true,
+        reason: "precheck_conflict_existing_entity_name_mismatch",
+        outcome: "precheck_conflict",
+      };
+    }
+    return { skipExecution: false, failExecution: false, reason: null, outcome: null };
+  }
+
+  _valueTokens(value, out = new Set()) {
+    if (value == null) return out;
+    if (typeof value === "number" || typeof value === "boolean") {
+      out.add(String(value).toLowerCase());
+      return out;
+    }
+    if (typeof value === "string") {
+      const text = value.toLowerCase();
+      const compact = text.replace(/\s+/g, "");
+      if (compact) out.add(compact);
+      for (const token of compact.match(/[a-z0-9_.-]+/g) ?? []) {
+        if (token) out.add(token);
+      }
+      return out;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) this._valueTokens(item, out);
+      return out;
+    }
+    if (isPlainObject(value)) {
+      for (const [k, v] of Object.entries(value)) {
+        const nk = normalizeKey(k);
+        if (nk) out.add(nk);
+        this._valueTokens(v, out);
+      }
+      return out;
+    }
+    return out;
+  }
+
+  _looselyEquivalentValue(expected, actual) {
+    if (actual == null) return false;
+    const actualText = safeString(
+      typeof actual === "string" ? actual : JSON.stringify(actual)
+    ).toLowerCase().replace(/\s+/g, "");
+    if (!actualText) return false;
+    const tokens = [...this._valueTokens(expected)];
+    if (tokens.length < 1) return false;
+    // Ignore very short noisy tokens; enforce all meaningful tokens.
+    const meaningful = tokens.filter((t) => safeString(t).length >= 2);
+    if (meaningful.length < 1) return false;
+    return meaningful.every((token) => actualText.includes(token));
+  }
+
+  _readbackFingerprint(raw = null) {
+    const payloads = parseJsonLikeContentBlocks(raw);
+    try {
+      return JSON.stringify(payloads);
+    } catch {
+      return safeString(raw);
+    }
+  }
+
+  _postReadbackMatchesExpectedProperties({ mutationArgs = {}, postRaw = null } = {}) {
+    const expected = this._extractExpectedMutationProperties(mutationArgs);
+    if (!isPlainObject(expected) || Object.keys(expected).length < 1) {
+      return { constrained: false, ok: true, unmatched: [] };
+    }
+    const payloads = parseJsonLikeContentBlocks(postRaw);
+    const unmatched = [];
+    for (const [propPath, expectedValue] of Object.entries(expected)) {
+      const prop = safeString(propPath).trim();
+      if (!prop) continue;
+      const root = normalizeKey(prop.split("/")[0] || prop);
+      const leaf = normalizeKey(prop.split("/").pop() || prop);
+      const keys = new Set([root, leaf].filter(Boolean));
+      const candidates = [];
+      for (const payload of payloads) {
+        this._collectCandidatePropertyValues(payload, keys, candidates);
+      }
+      const matched = candidates.some((candidate) => this._looselyEquivalentValue(expectedValue, candidate));
+      if (!matched) unmatched.push(prop);
+    }
+    return {
+      constrained: true,
+      ok: unmatched.length === 0,
+      unmatched,
+    };
+  }
+
   async _verifyMutationViaReadback({
     toolName,
     args,
@@ -1073,6 +1560,45 @@ export class Executor {
       return {
         ok: false,
         reason: "Post-mutation read-back did not contain expected target/property evidence.",
+      };
+    }
+    const expectedMatch = this._postReadbackMatchesExpectedProperties({
+      mutationArgs: args,
+      postRaw: post.raw,
+    });
+    if (expectedMatch.constrained && !expectedMatch.ok) {
+      return {
+        ok: false,
+        reason: `Post-mutation read-back missing expected value(s): ${expectedMatch.unmatched.join(", ")}`,
+      };
+    }
+    const noEffect = this._classifyNoEffectMutation({
+      toolName,
+      mutationArgs: args,
+      rawResult,
+      preRaw: pre.raw,
+      postRaw: post.raw,
+    });
+    if (noEffect.unchanged && noEffect.alreadySatisfied) {
+      return {
+        ok: true,
+        outcome: "already_satisfied",
+        reason: safeString(noEffect.reason).trim() || "already_satisfied",
+        readTool: safeString(plan?.readTool?.name).trim() || null,
+        readArgs: isPlainObject(plan?.readArgs) ? plan.readArgs : null,
+      };
+    }
+    if (noEffect.unchanged) {
+      const noEffectReason = safeString(noEffect.reason).trim();
+      if (noEffectReason === "name_conflict_existing_entity_mismatch") {
+        return {
+          ok: false,
+          reason: "Mutation verification failed: node name already exists with different parent/type.",
+        };
+      }
+      return {
+        ok: false,
+        reason: "Mutation verification failed: step produced no observable change.",
       };
     }
     return {

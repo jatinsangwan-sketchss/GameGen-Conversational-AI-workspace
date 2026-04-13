@@ -179,6 +179,9 @@ export class ResultPresenter {
     const looksMutation = key.includes("set") || key.includes("add") || key.includes("save") || key.includes("create") || key.includes("delete");
     if (looksMutation) {
       lines.push("Status: success");
+      if (safeString(toolResult?.outcome).trim() === "already_satisfied") {
+        lines.push("Note: Target state already existed; no new mutation was required.");
+      }
       lines.push(`Args: ${formatInline(args, 400)}`);
       if (this._debug) lines.push(`Raw: ${formatInline(raw, 700)}`);
       return lines;
@@ -215,4 +218,3 @@ export class ResultPresenter {
     return rawResult;
   }
 }
-

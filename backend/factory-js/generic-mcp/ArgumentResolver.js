@@ -777,17 +777,17 @@ export class ArgumentResolver {
       out.targetNodePath,
       out.nodeRef,
       out.nodePath,
+      out.nodeName,
+      out.targetNodeName,
+      semState.targetConcept,
+      semIntent.targetConcept,
+      out.requestedName,
+      semStateCreation.requestedName,
+      semIntentCreation.requestedName,
       semStateRefs.targetNodeRef,
       semStateRefs.nodeRef,
       semIntentRefs.targetNodeRef,
       semIntentRefs.nodeRef,
-      semState.targetConcept,
-      semIntent.targetConcept,
-      out.nodeName,
-      out.targetNodeName,
-      out.requestedName,
-      semStateCreation.requestedName,
-      semIntentCreation.requestedName,
     ];
     for (const candidate of candidates) {
       const value = safeString(candidate).trim();
@@ -1720,13 +1720,24 @@ export class ArgumentResolver {
     const a = isPlainObject(args) ? args : {};
     const semStateRefs = isPlainObject(workflowState?.semanticState?.targetRefs) ? workflowState.semanticState.targetRefs : {};
     const semIntentRefs = isPlainObject(workflowState?.semanticIntent?.refs) ? workflowState.semanticIntent.refs : {};
+    const currentStepSemanticTarget =
+      safeString(a.targetNodeRef).trim() ||
+      safeString(a.parentNodeRef).trim() ||
+      safeString(a.nodeRef).trim() ||
+      safeString(a.targetNode).trim() ||
+      safeString(a.targetNodePath).trim() ||
+      safeString(a.nodePath).trim() ||
+      safeString(a.nodeName).trim() ||
+      safeString(a.targetNodeName).trim() ||
+      safeString(workflowState?.semanticState?.targetConcept).trim() ||
+      safeString(workflowState?.semanticIntent?.targetConcept).trim() ||
+      null;
     const semanticTarget =
+      currentStepSemanticTarget ||
       safeString(semStateRefs.targetNodeRef).trim() ||
       safeString(semStateRefs.nodeRef).trim() ||
       safeString(semIntentRefs.targetNodeRef).trim() ||
       safeString(semIntentRefs.nodeRef).trim() ||
-      safeString(a.targetNodeRef).trim() ||
-      safeString(a.parentNodeRef).trim() ||
       null;
     if (!semanticTarget || isLikelyMarkerToken(semanticTarget)) return { ok: true };
     const resolvedTarget =

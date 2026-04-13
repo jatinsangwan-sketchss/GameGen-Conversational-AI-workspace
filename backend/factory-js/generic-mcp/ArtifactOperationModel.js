@@ -64,13 +64,14 @@ export function buildArtifactOperationState({ semanticIntent = null } = {}) {
   const goalType = safeString(intent?.goalType).trim().toLowerCase();
   const existingTargetRef = anyRef(intent);
   const hasNamedCreationIntent = hasText(intent?.creationIntent?.requestedName);
+  const sceneMutationIntent = hasSceneMutationSignal(text);
   const createArtifactSignal = hasCreateArtifactSignal(text);
-  const createArtifactIntent = createArtifactSignal || hasNamedCreationIntent;
+  const createArtifactIntent = createArtifactSignal || (hasNamedCreationIntent && !sceneMutationIntent);
   const createTargetRefLikelyOutput = Boolean(existingTargetRef) && createArtifactIntent && looksLikeArtifactPath(existingTargetRef);
   const wantsCreate =
     goalType === "create" ||
     (hasCreateSignal(text) && goalType !== "modify") ||
-    (hasText(intent?.creationIntent?.requestedName) && !existingTargetRef && goalType !== "modify");
+    (hasText(intent?.creationIntent?.requestedName) && !existingTargetRef && goalType !== "modify" && !sceneMutationIntent);
   const wantsModify =
     hasModifySignal(text) ||
     hasSceneMutationSignal(text) ||

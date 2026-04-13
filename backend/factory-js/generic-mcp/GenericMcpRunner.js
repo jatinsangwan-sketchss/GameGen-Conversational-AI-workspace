@@ -34,6 +34,7 @@ import {
 } from "./ArtifactOperationModel.js";
 import { compactStepVerification, verifyWorkflowPostconditions } from "./PostconditionVerifier.js";
 import { ensureGeneratedContentForStep } from "./ContentGenerationStage.js";
+import { TextEditFallbackStage } from "./TextEditFallbackStage.js";
 import {
   buildSemanticWorkflowState,
   seedArgsFromSemanticState,
@@ -157,15 +158,20 @@ function extractFeatureTriggerInfo(userRequest, priorWorkflow = null) {
   const raw = safeString(userRequest);
   const tscnRegex = /\btscn\s+edit\b\s*:?/i;
   const scriptValidationRegex = /\bscript\s+valid\?\s*:?/i;
+  const textEditFallbackRegex = /\b(?:text\s*[- ]?\s*edit(?:\s+fallback|\s+mode)?|fallback\s+text\s*[- ]?\s*edit)\b\s*:?/i;
   const promptHadTscnTrigger = tscnRegex.test(raw);
   const promptHadScriptValidationTrigger = scriptValidationRegex.test(raw);
+  const promptHadTextEditFallbackTrigger = textEditFallbackRegex.test(raw);
   const priorTscnEnabled = Boolean(priorWorkflow?.featureFlags?.tscnEdit?.enabled);
   const priorScriptValidationEnabled = Boolean(priorWorkflow?.featureFlags?.scriptValidation?.enabled);
+  const priorTextEditFallbackEnabled = Boolean(priorWorkflow?.featureFlags?.textEditFallback?.enabled);
   const tscnEnabled = promptHadTscnTrigger || priorTscnEnabled;
   const scriptValidationEnabled = promptHadScriptValidationTrigger || priorScriptValidationEnabled;
+  const textEditFallbackEnabled = promptHadTextEditFallbackTrigger || priorTextEditFallbackEnabled;
   const sanitizedRequest = raw
     .replace(tscnRegex, " ")
     .replace(scriptValidationRegex, " ")
+    .replace(textEditFallbackRegex, " ")
     .replace(/\s{2,}/g, " ")
     .trim();
   return {
@@ -176,6 +182,10 @@ function extractFeatureTriggerInfo(userRequest, priorWorkflow = null) {
     scriptValidation: {
       enabled: scriptValidationEnabled,
       promptHadTrigger: promptHadScriptValidationTrigger,
+    },
+    textEditFallback: {
+      enabled: textEditFallbackEnabled,
+      promptHadTrigger: promptHadTextEditFallbackTrigger,
     },
     sanitizedRequest: sanitizedRequest || raw.trim(),
   };
@@ -236,6 +246,7 @@ export class GenericMcpRunner {
       resourceResolver: null,
       nodeResolver: null,
       artifactRegistry: null,
+      textEditFallback: null,
     };
   }
 
@@ -395,15 +406,22 @@ export class GenericMcpRunner {
       resumeNeedsInput,
       tscnEdit: featureTrigger.tscnEdit,
       scriptValidation: featureTrigger.scriptValidation,
+      textEditFallback: featureTrigger.textEditFallback,
     });
-    console.log("[VERIFY][tscn-edit-trigger]", {
-      enabled: Boolean(featureTrigger.tscnEdit?.enabled),
-      promptHadTrigger: Boolean(featureTrigger.tscnEdit?.promptHadTrigger),
-    });
-    console.log("[VERIFY][script-validation-trigger]", {
-      enabled: Boolean(featureTrigger.scriptValidation?.enabled),
-      promptHadTrigger: Boolean(featureTrigger.scriptValidation?.promptHadTrigger),
-    });
+    if (this._debug) {
+      console.log("[VERIFY][tscn-edit-trigger]", {
+        enabled: Boolean(featureTrigger.tscnEdit?.enabled),
+        promptHadTrigger: Boolean(featureTrigger.tscnEdit?.promptHadTrigger),
+      });
+      console.log("[VERIFY][script-validation-trigger]", {
+        enabled: Boolean(featureTrigger.scriptValidation?.enabled),
+        promptHadTrigger: Boolean(featureTrigger.scriptValidation?.promptHadTrigger),
+      });
+      console.log("[VERIFY][text-edit-fallback-trigger]", {
+        enabled: Boolean(featureTrigger.textEditFallback?.enabled),
+        promptHadTrigger: Boolean(featureTrigger.textEditFallback?.promptHadTrigger),
+      });
+    }
     this._ensureCanonicalSemanticState(workflowState);
     let seedDecision = this._buildResumePlan(resumeNeedsInput, plannerRequest);
     let lastPlanning = null;
@@ -621,6 +639,55 @@ export class GenericMcpRunner {
 
       if (["needs_input", "missing_args", "ambiguous", "unsupported"].includes(decisionStatus)) {
         if (decisionStatus === "unsupported") {
+          const fallbackAttempt = await this._tryTextEditFallback({
+            userRequest: plannerRequest,
+            projectRoot: activeProjectRoot,
+            planningResult: planning,
+            resolvedPlan: null,
+            workflowState,
+            reason: safeString(planning?.reason).trim() || "planner_unsupported",
+          });
+          if (fallbackAttempt.attempted && fallbackAttempt.ok && fallbackAttempt.executionResult) {
+            const presentation = "Completed via safe text-edit fallback.";
+            return this._buildRunResult({
+              ok: true,
+              status: "completed",
+              reason: null,
+              sessionStatus,
+              inventorySummary: { toolCount: inventory.toolCount, fetchedAt: inventory.fetchedAt },
+              planningResult: planning,
+              resolvedPlan: null,
+              executionResult: fallbackAttempt.executionResult,
+              presentation,
+              workflowState,
+              runtimeState: this._runtimeWithWorkflow({
+                planningResult: planning,
+                resolvedPlan: null,
+                inventory,
+                workflowState,
+              }),
+            });
+          }
+          if (fallbackAttempt.attempted && !fallbackAttempt.ok) {
+            return this._buildRunResult({
+              ok: false,
+              status: "failed",
+              reason: safeString(fallbackAttempt.reason).trim() || "text_edit_fallback_failed",
+              sessionStatus,
+              inventorySummary: { toolCount: inventory.toolCount, fetchedAt: inventory.fetchedAt },
+              planningResult: planning,
+              resolvedPlan: null,
+              executionResult: null,
+              presentation: `Fallback failed: ${safeString(fallbackAttempt.reason).trim() || "unknown error"}`,
+              workflowState,
+              runtimeState: this._runtimeWithWorkflow({
+                planningResult: planning,
+                resolvedPlan: null,
+                inventory,
+                workflowState,
+              }),
+            });
+          }
           return this._buildRunResult({
             ok: false,
             status: "unsupported",
@@ -690,6 +757,54 @@ export class GenericMcpRunner {
 
       if (resolvedPlan.status !== "ready") {
         refreshPendingSemanticGaps(workflowState?.semanticState, workflowState?.artifactOperation);
+        const fallbackAttempt = await this._tryTextEditFallback({
+          userRequest: plannerRequest,
+          projectRoot: activeProjectRoot,
+          planningResult: contentSeededPlanForResolver,
+          resolvedPlan,
+          workflowState,
+          reason: safeString(resolvedPlan?.reason).trim() || safeString(resolvedPlan?.status).trim() || "resolver_not_ready",
+        });
+        if (fallbackAttempt.attempted && fallbackAttempt.ok && fallbackAttempt.executionResult) {
+          return this._buildRunResult({
+            ok: true,
+            status: "completed",
+            reason: null,
+            sessionStatus,
+            inventorySummary: { toolCount: inventory.toolCount, fetchedAt: inventory.fetchedAt },
+            planningResult: contentSeededPlanForResolver,
+            resolvedPlan,
+            executionResult: fallbackAttempt.executionResult,
+            presentation: "Completed via safe text-edit fallback.",
+            workflowState,
+            runtimeState: this._runtimeWithWorkflow({
+              planningResult: contentSeededPlanForResolver,
+              resolvedPlan,
+              inventory,
+              workflowState,
+            }),
+          });
+        }
+        if (fallbackAttempt.attempted && !fallbackAttempt.ok) {
+          return this._buildRunResult({
+            ok: false,
+            status: "failed",
+            reason: safeString(fallbackAttempt.reason).trim() || "text_edit_fallback_failed",
+            sessionStatus,
+            inventorySummary: { toolCount: inventory.toolCount, fetchedAt: inventory.fetchedAt },
+            planningResult: contentSeededPlanForResolver,
+            resolvedPlan,
+            executionResult: null,
+            presentation: `Fallback failed: ${safeString(fallbackAttempt.reason).trim() || "unknown error"}`,
+            workflowState,
+            runtimeState: this._runtimeWithWorkflow({
+              planningResult: contentSeededPlanForResolver,
+              resolvedPlan,
+              inventory,
+              workflowState,
+            }),
+          });
+        }
         return this._buildNeedsInputResult({
           sessionStatus,
           inventory,
@@ -843,7 +958,7 @@ export class GenericMcpRunner {
         inventory,
         workflowState,
       });
-      const executionResult = await executor.execute(gatedReadyPlan, {
+      let executionResult = await executor.execute(gatedReadyPlan, {
         sessionStatus,
         inventory: toolInventory,
         artifactRegistry: this._modules.artifactRegistry,
@@ -859,6 +974,30 @@ export class GenericMcpRunner {
         inventory,
         workflowState,
       });
+      if (!executionResult?.ok) {
+        const executionError = safeString(executionResult?.error).trim();
+        const skipTextEditFallback =
+          /^mutation blocked by pre-check:/i.test(executionError) ||
+          /^precheck_conflict\b/i.test(executionError);
+        if (!skipTextEditFallback) {
+          const fallbackAttempt = await this._tryTextEditFallback({
+            userRequest: plannerRequest,
+            projectRoot: activeProjectRoot,
+            planningResult: contentSeededPlanForResolver,
+            resolvedPlan: gatedReadyPlan,
+            workflowState,
+            reason: executionError || "execution_failed",
+          });
+          if (fallbackAttempt.attempted && fallbackAttempt.ok && fallbackAttempt.executionResult) {
+            executionResult = fallbackAttempt.executionResult;
+          } else if (fallbackAttempt.attempted && !fallbackAttempt.ok) {
+            executionResult = {
+              ...(isPlainObject(executionResult) ? executionResult : { ok: false, results: [], error: "execution_failed" }),
+              error: safeString(fallbackAttempt.reason).trim() || executionError || "text_edit_fallback_failed",
+            };
+          }
+        }
+      }
       const artifactsAfter = Array.isArray(this._modules.artifactRegistry?.getAll?.())
         ? this._modules.artifactRegistry.getAll().length
         : artifactsBefore;
@@ -1030,6 +1169,31 @@ export class GenericMcpRunner {
         .replace(/^\d+\s*[\)\.\-:]\s+/, "")
         .replace(/\s+/g, " ")
         .trim();
+    const isActionableTask = (segment) => /\b(?:use|add|create|set|rename|attach|remove|delete|move|reparent|duplicate)\b/i.test(safeString(segment));
+    const isContextPrefixOnly = (segment) => {
+      const s = safeString(segment).trim();
+      if (!s) return false;
+      if (isActionableTask(s)) return false;
+      return /^in\s+.+\.(?:tscn|gd)\s*,?$/i.test(s) || /^in\s+.+,\s*$/i.test(s);
+    };
+    const mergeContextPrefixTasks = (segments = []) => {
+      const list = Array.isArray(segments) ? [...segments] : [];
+      const out = [];
+      for (let i = 0; i < list.length; i += 1) {
+        const current = normalizeTask(list[i]);
+        if (!current) continue;
+        if (isContextPrefixOnly(current) && i + 1 < list.length) {
+          const next = normalizeTask(list[i + 1]);
+          if (next && isActionableTask(next)) {
+            out.push(normalizeTask(`${current.replace(/[.,]\s*$/, "")}, ${next}`));
+            i += 1;
+            continue;
+          }
+        }
+        out.push(current);
+      }
+      return out.filter(Boolean);
+    };
 
     const lineTasks = text
       .split(/\r?\n+/)
@@ -1042,6 +1206,18 @@ export class GenericMcpRunner {
       .map(normalizeTask)
       .filter(Boolean);
     if (semicolonTasks.length > 1) return semicolonTasks;
+
+    // Sentence-style procedural prompts often chain steps as:
+    // "Create X. Use tool A... Use tool B..."
+    // Split on sentence boundaries only when the next sentence starts with a
+    // workflow verb to avoid over-splitting normal prose.
+    const sentenceTaskStarters = "(?:use|add|create|set|rename|attach|remove|delete|move|reparent|duplicate)";
+    const sentenceTasks = text
+      .split(new RegExp(`\\s*(?:\\.\\s+(?=${sentenceTaskStarters}\\b)|\\.\\s+(?=in\\s+\\S+\\s*[,;:]\\s*${sentenceTaskStarters}\\b))`, "i"))
+      .map(normalizeTask)
+      .filter(Boolean);
+    const mergedSentenceTasks = mergeContextPrefixTasks(sentenceTasks);
+    if (mergedSentenceTasks.length > 1) return mergedSentenceTasks;
 
     const connectorTasks = text
       .split(/\s*(?:,\s*then\s+|,\s*next\s+|\band then\b\s+|\bthen\b\s+)/i)
@@ -1392,8 +1568,149 @@ export class GenericMcpRunner {
     if (!this._modules.artifactRegistry) {
       this._modules.artifactRegistry = new ArtifactRegistry();
     }
+    if (!this._modules.textEditFallback) {
+      this._modules.textEditFallback = new TextEditFallbackStage({
+        sessionManager: this._modules.sessionManager,
+        toolInventory: this._modules.toolInventory,
+        modelClient: this._modelClient,
+        debug: this._debug,
+      });
+    }
 
     void projectRoot;
+  }
+
+  _isTextEditFallbackEnabled(workflowState = null) {
+    return Boolean(
+      workflowState?.featureFlags?.textEditFallback?.enabled ||
+      workflowState?.semanticState?.knownFacts?.textEditFallbackEnabled
+    );
+  }
+
+  _extractTextEditableTargetFromContext({ userRequest = "", planningResult = null, resolvedPlan = null, workflowState = null } = {}) {
+    const candidates = [];
+    const pushCandidate = (value) => {
+      const raw = safeString(value).trim();
+      if (!raw) return;
+      const normalized = raw
+        .replace(/^res:\/\//i, "")
+        .replace(/^\/+/, "")
+        .replace(/\\/g, "/");
+      if (!/\.(gd|tscn)$/i.test(normalized)) return;
+      candidates.push(normalized);
+    };
+    const collectFromArgs = (args) => {
+      const a = isPlainObject(args) ? args : {};
+      for (const [k, v] of Object.entries(a)) {
+        const nk = safeString(k).toLowerCase();
+        if (!/(path|ref|file|script|scene)/.test(nk)) continue;
+        pushCandidate(v);
+      }
+    };
+    const tools = [
+      ...(Array.isArray(planningResult?.tools) ? planningResult.tools : []),
+      ...(Array.isArray(resolvedPlan?.tools) ? resolvedPlan.tools : []),
+    ];
+    for (const t of tools) collectFromArgs(t?.args);
+    const stepArgs = isPlainObject(planningResult?.step?.args) ? planningResult.step.args : {};
+    collectFromArgs(stepArgs);
+    const semanticRefs = isPlainObject(workflowState?.semanticState?.targetRefs) ? workflowState.semanticState.targetRefs : {};
+    for (const value of Object.values(semanticRefs)) pushCandidate(value);
+    const semanticIntentRefs = isPlainObject(workflowState?.semanticIntent?.refs) ? workflowState.semanticIntent.refs : {};
+    for (const value of Object.values(semanticIntentRefs)) pushCandidate(value);
+    const request = safeString(userRequest);
+    for (const m of request.matchAll(/((?:res:\/\/)?[A-Za-z0-9_./-]+\.(?:gd|tscn))/gi)) {
+      pushCandidate(m?.[1]);
+    }
+    const withDir = candidates.find((c) => c.includes("/"));
+    return withDir ?? candidates[0] ?? null;
+  }
+
+  _resolveTextEditableTargetPath({ targetPath = null, projectRoot = null } = {}) {
+    const rel = safeString(targetPath).trim()
+      .replace(/^res:\/\//i, "")
+      .replace(/^\/+/, "")
+      .replace(/\\/g, "/");
+    if (!rel || !/\.(gd|tscn)$/i.test(rel)) return null;
+    if (rel.includes("/")) return rel;
+    const fileIndex = this._modules.fileIndex;
+    const root = safeString(projectRoot).trim();
+    if (!fileIndex || !root) return rel;
+    const matches = [];
+    const pushMatches = (list) => {
+      for (const item of Array.isArray(list) ? list : []) {
+        const candidate = safeString(item?.relative_path).trim().replace(/\\/g, "/");
+        if (!candidate || !/\.(gd|tscn)$/i.test(candidate)) continue;
+        if (candidate.toLowerCase().endsWith(rel.toLowerCase())) matches.push(candidate);
+      }
+    };
+    pushMatches(fileIndex.findByRelativePath(rel));
+    pushMatches(fileIndex.findByFilename(rel));
+    const stem = rel.replace(/\.(gd|tscn)$/i, "");
+    if (stem) pushMatches(fileIndex.findByStem(stem));
+    const deduped = [...new Set(matches)];
+    if (deduped.length === 1) return deduped[0];
+    const ext = rel.toLowerCase().endsWith(".tscn") ? ".tscn" : ".gd";
+    const preferredDir = ext === ".tscn" ? "/scenes/" : "/scripts/";
+    const preferred = deduped.find((p) => p.toLowerCase().includes(preferredDir));
+    return preferred || deduped[0] || rel;
+  }
+
+  async _tryTextEditFallback({
+    userRequest = "",
+    projectRoot = null,
+    planningResult = null,
+    resolvedPlan = null,
+    workflowState = null,
+    reason = null,
+  } = {}) {
+    if (!this._isTextEditFallbackEnabled(workflowState)) return { attempted: false, ok: false, reason: "fallback_disabled" };
+    const stage = this._modules.textEditFallback;
+    if (!stage || typeof stage.attempt !== "function") return { attempted: false, ok: false, reason: "fallback_stage_unavailable" };
+    const targetPath = this._extractTextEditableTargetFromContext({
+      userRequest,
+      planningResult,
+      resolvedPlan,
+      workflowState,
+    });
+    if (!targetPath) return { attempted: false, ok: false, reason: "fallback_target_unavailable" };
+    const root = safeString(projectRoot).trim() ||
+      safeString(workflowState?.semanticState?.targetRefs?.projectPath).trim() ||
+      "";
+    if (!root) return { attempted: false, ok: false, reason: "fallback_project_root_unavailable" };
+    const resolvedTargetPath = this._resolveTextEditableTargetPath({
+      targetPath,
+      projectRoot: root,
+    });
+    if (!resolvedTargetPath) return { attempted: false, ok: false, reason: "fallback_target_unavailable" };
+    const res = await stage.attempt({
+      userRequest,
+      projectRoot: root,
+      targetPath: resolvedTargetPath,
+      reason,
+      workflowState,
+    });
+    const fallbackReason = safeString(res?.reason).trim();
+    if (/^fallback_target_(?:not_found|not_supported)\b/i.test(fallbackReason)) {
+      return {
+        attempted: false,
+        ok: false,
+        reason: fallbackReason || "fallback_target_unavailable",
+        executionResult: null,
+        fallback: isPlainObject(res?.fallback) ? res.fallback : null,
+      };
+    }
+    if (isPlainObject(workflowState)) {
+      if (!isPlainObject(workflowState.semanticState)) workflowState.semanticState = {};
+      workflowState.semanticState.lastTextEditFallback = isPlainObject(res?.fallback) ? res.fallback : null;
+    }
+    return {
+      attempted: true,
+      ok: Boolean(res?.ok),
+      reason: fallbackReason || null,
+      executionResult: isPlainObject(res?.executionResult) ? res.executionResult : null,
+      fallback: isPlainObject(res?.fallback) ? res.fallback : null,
+    };
   }
 
   _presentNonReadyState(resolvedPlan) {
@@ -1636,7 +1953,7 @@ export class GenericMcpRunner {
     };
   }
 
-  _initWorkflowState({ userRequest, resumeNeedsInput, tscnEdit = null, scriptValidation = null }) {
+  _initWorkflowState({ userRequest, resumeNeedsInput, tscnEdit = null, scriptValidation = null, textEditFallback = null }) {
     const prior = isPlainObject(resumeNeedsInput?.workflow) ? resumeNeedsInput.workflow : null;
     const priorIntent = isPlainObject(prior?.semanticIntent) ? prior.semanticIntent : null;
     const semanticIntent = this._sanitizeSemanticIntent({
@@ -1674,26 +1991,36 @@ export class GenericMcpRunner {
       unmetPostconditions: Array.isArray(prior?.unmetPostconditions) ? [...prior.unmetPostconditions] : [],
       featureFlags: isPlainObject(prior?.featureFlags) ? { ...prior.featureFlags } : {},
     };
+    const envTextEditFallbackEnabled = safeString(process.env.GENERIC_MCP_TEXT_EDIT_FALLBACK).trim().toLowerCase() === "true";
     workflowState.featureFlags.tscnEdit = {
       enabled: Boolean(
-        tscnEdit?.enabled ??
-        prior?.featureFlags?.tscnEdit?.enabled ??
-        false
+        tscnEdit?.enabled ||
+        prior?.featureFlags?.tscnEdit?.enabled
       ),
       promptHadTrigger: Boolean(tscnEdit?.promptHadTrigger ?? false),
     };
     workflowState.featureFlags.scriptValidation = {
       enabled: Boolean(
-        scriptValidation?.enabled ??
-        prior?.featureFlags?.scriptValidation?.enabled ??
-        false
+        scriptValidation?.enabled ||
+        prior?.featureFlags?.scriptValidation?.enabled
       ),
       promptHadTrigger: Boolean(scriptValidation?.promptHadTrigger ?? false),
+    };
+    workflowState.featureFlags.textEditFallback = {
+      enabled: Boolean(
+        textEditFallback?.enabled ||
+        prior?.featureFlags?.textEditFallback?.enabled ||
+        envTextEditFallbackEnabled
+      ),
+      promptHadTrigger: Boolean(textEditFallback?.promptHadTrigger ?? false),
     };
     if (!isPlainObject(workflowState.semanticState.knownFacts)) workflowState.semanticState.knownFacts = {};
     workflowState.semanticState.knownFacts.tscnEditEnabled = Boolean(workflowState.featureFlags?.tscnEdit?.enabled);
     workflowState.semanticState.knownFacts.scriptValidationEnabled = Boolean(
       workflowState.featureFlags?.scriptValidation?.enabled
+    );
+    workflowState.semanticState.knownFacts.textEditFallbackEnabled = Boolean(
+      workflowState.featureFlags?.textEditFallback?.enabled
     );
     this._refreshEffectState(workflowState);
     this._ensureCanonicalSemanticState(workflowState);
