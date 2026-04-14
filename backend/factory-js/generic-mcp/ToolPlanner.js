@@ -672,7 +672,14 @@ export class ToolPlanner {
     if (!this._modelClient || typeof this._modelClient.generate !== "function") {
       return { ok: false, error: "Model client is not configured. Expected modelClient.generate({ prompt })." };
     }
-    const requestPlannerJson = async (plannerPrompt) => {
+    const requestPlannerJson = async (plannerPrompt, phase = "primary") => {
+      if (this._debug) {
+        console.log("[generic-mcp][tool-planner][model-input]", {
+          phase,
+          responseFormat: "json_object",
+          promptPreview: safeString(plannerPrompt).slice(0, 4000),
+        });
+      }
       const res = await this._modelClient.generate({
         prompt: plannerPrompt,
         responseFormat: "json_object",
@@ -682,14 +689,14 @@ export class ToolPlanner {
       return { parsed, rawText: text, rawResponse: res };
     };
     try {
-      const primary = await requestPlannerJson(prompt);
+      const primary = await requestPlannerJson(prompt, "primary");
       return { ok: true, ...primary };
     } catch (err) {
       if (!isLikelyJsonParseFailure(err)) {
         return { ok: false, error: safeString(err?.message ?? err) || "Planner model call failed." };
       }
       try {
-        const repaired = await requestPlannerJson(buildJsonRepairPrompt(prompt));
+        const repaired = await requestPlannerJson(buildJsonRepairPrompt(prompt), "json_repair");
         return { ok: true, ...repaired };
       } catch (retryErr) {
         return { ok: false, error: safeString(retryErr?.message ?? retryErr) || "Planner model call failed." };

@@ -1478,6 +1478,19 @@ export class Executor {
 
   _looselyEquivalentValue(expected, actual) {
     if (actual == null) return false;
+    const toFinite = (v) => {
+      if (typeof v === "number") return Number.isFinite(v) ? v : null;
+      const s = safeString(v).trim();
+      if (!s) return null;
+      if (!/^[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?$/.test(s)) return null;
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    };
+    const expectedNum = toFinite(expected);
+    const actualNum = toFinite(actual);
+    if (expectedNum != null && actualNum != null) {
+      return Math.abs(expectedNum - actualNum) <= 1e-9;
+    }
     const actualText = safeString(
       typeof actual === "string" ? actual : JSON.stringify(actual)
     ).toLowerCase().replace(/\s+/g, "");

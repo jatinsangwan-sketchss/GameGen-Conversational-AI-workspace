@@ -130,13 +130,20 @@ function normalizeOperations(rawOps = null) {
     const type = safeString(raw.type).trim().toLowerCase();
     if (!type) continue;
     const op = { type };
-    const copyIf = (key) => {
-      const v = safeString(raw[key]);
+    const copyIf = (key, aliases = []) => {
+      const v = safeString(raw[key] ?? aliases.map((a) => raw[a]).find((x) => x != null));
       if (v) op[key] = v;
     };
-    copyIf("find");
-    copyIf("replace");
-    copyIf("insert");
+    // Accept common alias keys from model outputs while preserving canonical ops.
+    copyIf("find", ["target", "anchor", "match"]);
+    if (type === "replace_once" || type === "replace_all") {
+      copyIf("replace", ["content", "replacement", "value", "insert", "text"]);
+    }
+    if (type === "insert_before" || type === "insert_after") {
+      copyIf("insert", ["content", "replacement", "value", "text", "replace"]);
+    } else {
+      copyIf("insert", ["text"]);
+    }
     copyIf("start");
     copyIf("end");
     normalized.push(op);
@@ -1149,6 +1156,13 @@ export class TextEditFallbackStage {
       "originalContent:",
       safeString(originalContent),
     ].filter(Boolean).join("\n");
+    this._debugLog("plan:model-input", {
+      targetPath: safeString(targetPath).trim() || null,
+      extension: safeString(extension).trim() || null,
+      reason: safeString(reason).trim() || null,
+      retryHint: safeString(retryHint).trim() || null,
+      promptPreview: safeString(prompt).slice(0, 4000),
+    });
     try {
       const raw = await this._modelClient.generate({ prompt, responseFormat: "json_object" });
       this._debugLog("plan:model-raw", {
@@ -1202,6 +1216,12 @@ export class TextEditFallbackStage {
       "invalidContent:",
       safeString(invalidContent),
     ].join("\n");
+    this._debugLog("repair:model-input", {
+      targetPath: safeString(targetPath).trim() || null,
+      extension: safeString(extension).trim() || null,
+      issues: Array.isArray(issues) ? issues : [],
+      promptPreview: safeString(prompt).slice(0, 4000),
+    });
     try {
       const raw = await this._modelClient.generate({ prompt, responseFormat: "text" });
       const text = safeString(raw?.text ?? raw).trim();

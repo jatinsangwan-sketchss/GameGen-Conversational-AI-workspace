@@ -93,6 +93,14 @@ async function attemptGodot4Repair({
   ].join("\n");
 
   try {
+    if (DEBUG_VERIFY) {
+      console.log("[generic-mcp][contentgen][model-input]", {
+        phase: "repair",
+        responseFormat: "text",
+        tool: safeString(toolName).trim() || null,
+        promptPreview: safeString(repairPrompt).slice(0, 4000),
+      });
+    }
     const repairedRaw = await modelClient.generate({ prompt: repairPrompt, responseFormat: "text" });
     const repairedText = stripCodeFences(safeString(repairedRaw?.text ?? repairedRaw));
     const finalText = normalizeGodot4Syntax(repairedText);
@@ -340,6 +348,14 @@ export async function ensureGeneratedContentForStep({
   let generated = null;
   if (modelClient && typeof modelClient.generate === "function") {
     try {
+      if (DEBUG_VERIFY) {
+        console.log("[generic-mcp][contentgen][model-input]", {
+          phase: "generate",
+          responseFormat: "json_object",
+          tool: safeString(toolName).trim() || null,
+          promptPreview: safeString(prompt).slice(0, 4000),
+        });
+      }
       const res = await modelClient.generate({ prompt, responseFormat: "json_object" });
       if (DEBUG_VERIFY) {
         console.log("[VERIFY][contentgen-raw-output]", res ?? null);

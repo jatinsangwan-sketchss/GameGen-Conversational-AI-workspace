@@ -1680,8 +1680,16 @@ export class ArgumentResolver {
     return t === "." || t === "root" || t === "root node" || t === "scene_root";
   }
 
+  _sanitizeNodeTargetToken(value) {
+    const raw = safeString(value).trim();
+    if (!raw) return "";
+    const unwrapped = raw.replace(/^["'`]+|["'`]+$/g, "").trim();
+    const stripped = unwrapped.replace(/^node\s+/i, "").trim();
+    return stripped || unwrapped || raw;
+  }
+
   _normalizeNodeTargetComparable(value) {
-    return safeString(value).trim().toLowerCase().replace(/^\.\/+/, "").replace(/^\/+/, "");
+    return this._sanitizeNodeTargetToken(value).toLowerCase().replace(/^\.\/+/, "").replace(/^\/+/, "");
   }
 
   _matchesNodeTarget(resolvedValue, semanticValue) {
@@ -2295,12 +2303,12 @@ export class ArgumentResolver {
       semIntentRefs.targetNodeRef,
       semIntentRefs.nodeRef,
     ]
-      .map((v) => safeString(v).trim())
+      .map((v) => this._sanitizeNodeTargetToken(v))
       .find((v) => v && !isLikelyMarkerToken(v) && !this._looksLikeFileResourceValue(v));
     if (!resolvedNodeTarget) return out;
 
     for (const key of nodeKeys) {
-      const current = safeString(out[key]).trim();
+      const current = this._sanitizeNodeTargetToken(out[key]);
       if (current && !isLikelyMarkerToken(current) && !this._looksLikeFileResourceValue(current)) continue;
       out[key] = resolvedNodeTarget;
     }

@@ -40,17 +40,21 @@ export class LiveModelClient {
     this._debug = Boolean(debug);
   }
 
-  _logModelRequestDebug() {
+  _logModelRequestDebug({ responseFormat = null, prompt = "" } = {}) {
     if (!this._debug) return;
     console.error(
       `[generic-mcp][model] backend=${this._backend} model=${this._model} baseUrl=${this._baseUrl}`
     );
+    console.error("[generic-mcp][model][input]", {
+      responseFormat: normalizeResponseFormat(responseFormat),
+      promptPreview: safeString(prompt).slice(0, 4000),
+    });
   }
 
   async generate({ prompt, responseFormat = null } = {}) {
     const p = safeString(prompt);
     if (!p.trim()) throw new Error("LiveModelClient requires non-empty prompt.");
-    this._logModelRequestDebug();
+    this._logModelRequestDebug({ responseFormat, prompt: p });
     const format = normalizeResponseFormat(responseFormat);
     if (this._backend === "openai") return this._generateOpenAiCompatible(p, { responseFormat: format });
     return this._generateLlama(p);
@@ -123,4 +127,3 @@ export class LiveModelClient {
     }
   }
 }
-
