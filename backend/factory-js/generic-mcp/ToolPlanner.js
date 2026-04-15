@@ -14,15 +14,13 @@
  *
  * Out of scope:
  * - tool execution
- * - argument/path resolution (see ArgumentResolver + PathSynthesizer)
+ * - argument/path resolution (see ArgumentResolver)
  * - result presentation
  */
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { classifyToolArgs, semanticArgCandidates, semanticSlotForArg } from "./ArgRoleClassifier.js";
-import { synthesizeMissingCreationPath } from "./PathSynthesizer.js";
-import { narrowPlannerCatalog } from "./PlannerCandidateRanker.js";
 
 function safeString(value) {
   return value == null ? "" : String(value);
@@ -93,6 +91,26 @@ function buildJsonRepairPrompt(prompt) {
   ].join("\n");
 }
 
+function buildCriticPrompt({ userRequest = "", sessionContext = {}, workflowState = {}, toolInventory = [], candidatePlan = {} } = {}) {
+  return [
+    "You are the Generic MCP Planner Critic.",
+    "Return ONLY one JSON object matching the planner schema.",
+    "Validate candidate plan against tool inventory and request.",
+    "Hard rules:",
+    "- Keep tool names exactly as inventory.",
+    "- Do not invent args not in tool schema.",
+    "- Ensure all required args are present unless session-injected projectPath.",
+    "- Preserve explicit user flags/values when clearly stated (e.g. debug=true).",
+    "- If plan is not executable, return missing_args/ambiguous/unsupported with reason.",
+    "",
+    `User request: ${JSON.stringify(safeString(userRequest).trim())}`,
+    `Session context: ${JSON.stringify(sessionContext, null, 2)}`,
+    `Workflow state: ${JSON.stringify(workflowState, null, 2)}`,
+    `Tool inventory: ${JSON.stringify(toolInventory, null, 2)}`,
+    `Candidate plan: ${JSON.stringify(candidatePlan, null, 2)}`,
+  ].join("\n");
+}
+
 function normalizeMissingArgs(args) {
   return Array.isArray(args)
     ? args.map((x) => safeString(x).trim()).filter(Boolean)
@@ -108,6 +126,211 @@ function normalizeAmbiguities(items) {
       return null;
     })
     .filter(Boolean);
+}
+
+function normalizeConfidence(value, fallback = 0.5) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(1, n));
+}
+
+function normalizeIntent(intent = "") {
+  const raw = safeString(intent).trim().toLowerCase();
+  const allowed = new Set(["create", "update", "read", "delete", "connect", "configure", "run", "unknown"]);
+  if (allowed.has(raw)) return raw;
+  return "unknown";
+}
+
+function inferIntentFromToolName(toolName = "") {
+  const t = safeString(toolName).trim().toLowerCase();
+  if (/\b(get|read|list|show|find|inspect|query|fetch|describe)\b/.test(t)) return "read";
+  if (/\b(create|new|add|generate)\b/.test(t)) return "create";
+  if (/\b(delete|remove)\b/.test(t)) return "delete";
+  if (/\b(connect|link|bind)\b/.test(t)) return "connect";
+  if (/\b(export|run|execute|build)\b/.test(t)) return "run";
+  if (/\b(set|update|modify|edit|patch|assign)\b/.test(t)) return "update";
+  return "unknown";
+}
+
+function hasRequiredArgValue(value) {
+  if (value == null) return false;
+  if (typeof value === "string") return safeString(value).trim() !== "";
+  return true;
+}
+
+function toolSchemaForName(tools = [], toolName = "") {
+  const map = new Map((Array.isArray(tools) ? tools : []).map((t) => [safeString(t?.name).trim(), t]));
+  const tool = map.get(safeString(toolName).trim());
+  return isPlainObject(tool?.inputSchema) ? tool.inputSchema : {};
+}
+
+function buildRequiredArgsCheck({ toolName = "", args = {}, tools = [] } = {}) {
+  const schema = toolSchemaForName(tools, toolName);
+  const required = Array.isArray(schema?.required) ? schema.required.map((k) => safeString(k).trim()).filter(Boolean) : [];
+  const missing = required.filter((k) => !hasRequiredArgValue(args?.[k]));
+  return { missing, mismatchedType: [], notes: [] };
+}
+
+function buildArgBindings(args = {}) {
+  const out = {};
+  for (const [key, value] of Object.entries(isPlainObject(args) ? args : {})) {
+    out[key] = {
+      value,
+      source: "planned",
+      confidence: 0.8,
+    };
+  }
+  return out;
+}
+
+function buildExpectedEffects({ toolName = "", intent = "unknown" } = {}) {
+  const effectMap = {
+    create: "artifactCreated",
+    update: "propertyUpdated",
+    read: "readPerformed",
+    delete: "artifactDeleted",
+    connect: "connectionAdded",
+    configure: "propertyUpdated",
+    run: "actionExecuted",
+    unknown: "unknown",
+  };
+  return [
+    {
+      effect: effectMap[intent] || "unknown",
+      target: safeString(toolName).trim() || "unknown",
+      predicate: `tool:${safeString(toolName).trim()} completed with expected observable effect`,
+    },
+  ];
+}
+
+function buildVerificationPlan({ toolName = "", intent = "unknown" } = {}) {
+  if (intent === "read" || intent === "run" || intent === "unknown") {
+    return {
+      mode: "none",
+      readTool: null,
+      readArgs: {},
+      assertions: [],
+      whyNone: "No generic read-back verifier selected at planning stage.",
+    };
+  }
+  return {
+    mode: "read_tool",
+    readTool: null,
+    readArgs: {},
+    assertions: [`verify effect of ${safeString(toolName).trim()}`],
+    whyNone: null,
+  };
+}
+
+function normalizeStepV2(step = {}, tools = []) {
+  const tool = safeString(step?.tool || step?.name).trim();
+  const args = isPlainObject(step?.args) ? step.args : {};
+  const intent = normalizeIntent(step?.intent) === "unknown" ? inferIntentFromToolName(tool) : normalizeIntent(step?.intent);
+  const requiredArgsCheck = isPlainObject(step?.requiredArgsCheck)
+    ? {
+        missing: normalizeMissingArgs(step.requiredArgsCheck.missing),
+        mismatchedType: normalizeMissingArgs(step.requiredArgsCheck.mismatchedType),
+        notes: Array.isArray(step.requiredArgsCheck.notes)
+          ? step.requiredArgsCheck.notes.map((x) => safeString(x).trim()).filter(Boolean)
+          : [],
+      }
+    : buildRequiredArgsCheck({ toolName: tool, args, tools });
+  const expectedEffects = Array.isArray(step?.expectedEffects) && step.expectedEffects.length > 0
+    ? step.expectedEffects
+    : buildExpectedEffects({ toolName: tool, intent });
+  const verificationPlan = isPlainObject(step?.verificationPlan)
+    ? step.verificationPlan
+    : buildVerificationPlan({ toolName: tool, intent });
+  return {
+    id: safeString(step?.id).trim() || null,
+    tool,
+    intent,
+    targetRefs: isPlainObject(step?.targetRefs) ? step.targetRefs : {},
+    argBindings: isPlainObject(step?.argBindings) ? step.argBindings : buildArgBindings(args),
+    requiredArgsCheck,
+    expectedEffects,
+    verificationPlan,
+    fallbackPolicy: isPlainObject(step?.fallbackPolicy)
+      ? step.fallbackPolicy
+      : {
+          allowTextEditFallback: true,
+          constraints: ["targeted_ops_only", "transactional_write", "blocking_validation"],
+        },
+    args,
+  };
+}
+
+function normalizeKeyForMatch(value = "") {
+  return safeString(value).trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function extractExplicitBooleanArgsFromRequest(request = "", schema = {}) {
+  const out = {};
+  const text = safeString(request);
+  const properties = isPlainObject(schema?.properties) ? schema.properties : {};
+  for (const [key, meta] of Object.entries(properties)) {
+    if (safeString(meta?.type).trim().toLowerCase() !== "boolean") continue;
+    const normalized = normalizeKeyForMatch(key);
+    const keyPattern = normalized.replace(/_/g, "[_\\s-]*");
+    const patterns = [
+      new RegExp(`\\b${keyPattern}\\b\\s*(?:=|to|as)\\s*(true|false)\\b`, "i"),
+      new RegExp(`\\bwith\\s+${keyPattern}\\s*(true|false)\\b`, "i"),
+      new RegExp(`\\b${keyPattern}\\s+(true|false)\\b`, "i"),
+      new RegExp(`--${keyPattern}\\b`, "i"),
+    ];
+    const condensed = text.toLowerCase().replace(/[^a-z0-9]+/g, " ");
+    for (const p of patterns) {
+      const m = condensed.match(p);
+      if (m?.[1]) {
+        out[key] = m[1].toLowerCase() === "true";
+        break;
+      }
+      if (!m && /--/.test(p.source || "") && new RegExp(`--${keyPattern}\\b`, "i").test(text)) {
+        out[key] = true;
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+function findPrimaryRequestVerb(request = "") {
+  const text = safeString(request).toLowerCase();
+  const verbs = ["export", "create", "add", "set", "connect", "delete", "remove", "update", "modify", "read", "get", "list", "run", "build"];
+  let best = null;
+  for (const verb of verbs) {
+    const idx = text.search(new RegExp(`\\b${verb}\\b`, "i"));
+    if (idx < 0) continue;
+    if (!best || idx < best.index) best = { verb, index: idx };
+  }
+  return best?.verb || null;
+}
+
+function toolNameSupportsVerb(toolName = "", verb = "") {
+  const name = safeString(toolName).toLowerCase();
+  const v = safeString(verb).toLowerCase();
+  if (!name || !v) return false;
+  if (name.includes(v)) return true;
+  const alias = {
+    get: ["read", "fetch", "list", "show", "describe"],
+    read: ["get", "fetch", "list", "show", "describe"],
+    update: ["set", "modify", "edit", "patch", "assign"],
+    modify: ["set", "update", "edit", "patch", "assign"],
+    set: ["update", "modify", "assign", "configure"],
+    export: ["build", "package"],
+    create: ["new", "add", "generate"],
+    add: ["create", "new"],
+    delete: ["remove"],
+    remove: ["delete"],
+    run: ["execute"],
+    build: ["export", "package"],
+  };
+  return (alias[v] || []).some((a) => name.includes(a));
+}
+
+function hasSequencingHint(request = "") {
+  const text = safeString(request).toLowerCase();
+  return /\b(first|before|then|after|next|followed by)\b/.test(text);
 }
 
 function normalizeRefToken(token) {
@@ -180,14 +403,6 @@ function hasNonEmpty(args, key) {
   return v != null && safeString(v).trim() !== "";
 }
 
-function mapCreationSynthesisReasonToMissingField(reason, fallbackSlot) {
-  const r = safeString(reason).trim().toLowerCase();
-  if (r === "missing_requested_name") return "requestedName";
-  if (r === "missing_target_folder" || r === "missing_folder") return "targetFolder";
-  if (r === "resourcekind_required_for_generic_file_path" || r === "cannot_infer_extension") return "resourceKind";
-  return fallbackSlot || "creationIntent";
-}
-
 function compactSemanticSummaryForVerify(sessionContext) {
   const wf = isPlainObject(sessionContext?.workflowState) ? sessionContext.workflowState : {};
   const semanticState = isPlainObject(wf?.semanticState) ? wf.semanticState : {};
@@ -215,6 +430,81 @@ function compactSemanticSummaryForVerify(sessionContext) {
     hasCompiledPayload: isPlainObject(semanticState?.compiledPayload) && Object.keys(semanticState.compiledPayload).length > 0,
     generatedPreview,
   };
+}
+
+function tokenize(input) {
+  return safeString(input)
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+function asSet(items) {
+  return new Set(Array.isArray(items) ? items : []);
+}
+
+function overlapScore(aSet, bSet) {
+  let hits = 0;
+  for (const t of aSet) {
+    if (bSet.has(t)) hits += 1;
+  }
+  return hits;
+}
+
+function hintTokensFromContext(sessionContext) {
+  const hints = Array.isArray(sessionContext?.resourceRefHints)
+    ? sessionContext.resourceRefHints
+    : [];
+  const out = [];
+  for (const h of hints) {
+    out.push(...tokenize(h?.ref));
+    out.push(...tokenize(h?.kind));
+  }
+  return out;
+}
+
+function scoreEntry(entry, requestTokens, hintTokenSet) {
+  const nameTokens = asSet(tokenize(entry?.name));
+  const summaryTokens = asSet(tokenize(entry?.summary));
+  const tagTokens = asSet((Array.isArray(entry?.tags) ? entry.tags : []).flatMap((x) => tokenize(x)));
+  const slotTokens = asSet((Array.isArray(entry?.requiredSlots) ? entry.requiredSlots : []).flatMap((x) => tokenize(x)));
+  const verbTokens = asSet(tokenize(entry?.verb));
+  const categoryTokens = asSet(tokenize(entry?.category));
+
+  let score = 0;
+  score += overlapScore(nameTokens, requestTokens) * 4;
+  score += overlapScore(tagTokens, requestTokens) * 3;
+  score += overlapScore(summaryTokens, requestTokens) * 2;
+  score += overlapScore(slotTokens, requestTokens) * 2;
+  score += overlapScore(verbTokens, requestTokens) * 2;
+  score += overlapScore(categoryTokens, requestTokens) * 2;
+  score += overlapScore(nameTokens, hintTokenSet) * 2;
+  score += overlapScore(tagTokens, hintTokenSet);
+
+  const requiredSlots = Array.isArray(entry?.requiredSlots) ? entry.requiredSlots : [];
+  for (const slot of requiredSlots) {
+    const slotSet = asSet(tokenize(slot));
+    if (overlapScore(slotSet, requestTokens) > 0 || overlapScore(slotSet, hintTokenSet) > 0) {
+      score += 1;
+    }
+  }
+
+  return score;
+}
+
+function narrowPlannerCatalog({ plannerCatalog = [], userRequest = "", sessionContext = null, limit = 12 } = {}) {
+  const requestTokenSet = asSet(tokenize(userRequest));
+  const hintTokenSet = asSet(hintTokensFromContext(sessionContext));
+  const ranked = (Array.isArray(plannerCatalog) ? plannerCatalog : [])
+    .map((entry, index) => ({
+      entry,
+      index,
+      score: scoreEntry(entry, requestTokenSet, hintTokenSet),
+    }))
+    .sort((a, b) => (b.score - a.score) || (a.index - b.index));
+  const n = Math.max(1, Math.min(Number(limit) || 1, ranked.length || 1));
+  return ranked.slice(0, n).map((x) => x.entry);
 }
 
 export class ToolPlanner {
@@ -296,6 +586,7 @@ export class ToolPlanner {
       }
       const validated = this.validatePlan(modelOutput.parsed, tools, {
         sessionContext: promptContext.sessionContext,
+        userRequest: request,
       });
       if (!validated.ok) {
         lastError = validated.error ?? "Planner output validation failed.";
@@ -303,30 +594,42 @@ export class ToolPlanner {
       }
       const enriched = this._enrichPlanWithExtractedRefs(validated.plan, tools, request);
       const cleaned = this._stripSessionInjectedArgsFromPlan(enriched, tools);
+      const critiqued = await this._runCriticPass({
+        candidatePlan: cleaned,
+        userRequest: request,
+        sessionContext: promptContext.sessionContext,
+        workflowState: isPlainObject(promptContext.sessionContext?.workflowState) ? promptContext.sessionContext.workflowState : {},
+        plannerCatalog: cat,
+        tools,
+      });
+      if (!critiqued.ok) {
+        lastError = critiqued.error || "Planner critic rejected candidate.";
+        continue;
+      }
       if (this._debug) {
         console.log("[VERIFY][planner-final-plan]", {
-          status: safeString(cleaned?.status).trim() || null,
-          tools: Array.isArray(cleaned?.tools)
-            ? cleaned.tools.map((t) => ({ name: safeString(t?.name).trim() || null, args: isPlainObject(t?.args) ? t.args : {} }))
+          status: safeString(critiqued?.plan?.status).trim() || null,
+          tools: Array.isArray(critiqued?.plan?.tools)
+            ? critiqued.plan.tools.map((t) => ({ name: safeString(t?.name).trim() || null, args: isPlainObject(t?.args) ? t.args : {} }))
             : [],
-          step: isPlainObject(cleaned?.step)
+          step: isPlainObject(critiqued?.plan?.step)
             ? {
-              tool: safeString(cleaned.step.tool).trim() || null,
-              args: isPlainObject(cleaned.step.args) ? cleaned.step.args : {},
-              reason: safeString(cleaned.step.reason).trim() || null,
+              tool: safeString(critiqued.plan.step.tool).trim() || null,
+              args: isPlainObject(critiqued.plan.step.args) ? critiqued.plan.step.args : {},
+              reason: safeString(critiqued.plan.step.reason).trim() || null,
             }
             : null,
-          missingArgs: Array.isArray(cleaned?.missingArgs) ? cleaned.missingArgs : [],
-          ambiguities: Array.isArray(cleaned?.ambiguities) ? cleaned.ambiguities : [],
-          reason: safeString(cleaned?.reason).trim() || null,
+          missingArgs: Array.isArray(critiqued?.plan?.missingArgs) ? critiqued.plan.missingArgs : [],
+          ambiguities: Array.isArray(critiqued?.plan?.ambiguities) ? critiqued.plan.ambiguities : [],
+          reason: safeString(critiqued?.plan?.reason).trim() || null,
+          confidence: normalizeConfidence(critiqued?.plan?.confidence, 0.5),
         });
       }
       
       const isFinalAttempt = i === attemptCatalogs.length - 1;
-      const shouldEscalate = !isFinalAttempt && this._shouldEscalateAttempt(cleaned);
+      const shouldEscalate = !isFinalAttempt && this._shouldEscalateAttempt(critiqued.plan);
       if (shouldEscalate) continue;
-      // console.log("[ToolPlanner] ", cleaned);
-      return cleaned;
+      return critiqued.plan;
     }
     return this._unsupported(lastError || "Planner could not produce a valid plan.");
   }
@@ -417,7 +720,7 @@ export class ToolPlanner {
     return { ...base, tools: patchedTools };
   }
 
-  validatePlan(parsedPlan, tools, { sessionContext = null } = {}) {
+  validatePlan(parsedPlan, tools, { sessionContext = null, userRequest = "" } = {}) {
     const parsed = isPlainObject(parsedPlan) ? parsedPlan : null;
     if (!parsed) return { ok: false, error: "Planner output must be an object." };
 
@@ -480,11 +783,88 @@ export class ToolPlanner {
       missingArgs: status === "missing_args" || status === "needs_input" ? missingArgs : [],
       ambiguities: status === "ambiguous" || status === "needs_input" ? ambiguities : [],
       reason: reason,
+      confidence: normalizeConfidence(parsed?.confidence, status === "ready" || status === "next_step" ? 0.8 : 0.6),
     };
     if (status === "ready" || status === "missing_args" || status === "next_step") {
-      return { ok: true, plan: this._reconcilePlannerMissingArgs(plan, tools, sessionContext) };
+      const reconciled = this._reconcilePlannerMissingArgs(plan, tools, sessionContext);
+      const intentAlignment = this._enforcePrimaryIntentAlignment({
+        plan: reconciled,
+        tools,
+        userRequest,
+      });
+      if (!intentAlignment.ok) return intentAlignment;
+      const explicitArgCheck = this._enforceExplicitUserArgs({
+        plan: reconciled,
+        tools,
+        userRequest,
+      });
+      if (!explicitArgCheck.ok) return explicitArgCheck;
+      return { ok: true, plan: this._attachPlannerV2Metadata(reconciled, tools) };
     }
     return { ok: true, plan };
+  }
+
+  _attachPlannerV2Metadata(plan, tools) {
+    const p = isPlainObject(plan) ? { ...plan } : {};
+    const entries = safeString(p.status).trim() === "next_step"
+      ? [{ id: "step_1", tool: safeString(p?.step?.tool).trim(), args: isPlainObject(p?.step?.args) ? p.step.args : {} }]
+      : (Array.isArray(p.tools) ? p.tools.map((t, i) => ({ id: `step_${i + 1}`, tool: safeString(t?.name).trim(), args: isPlainObject(t?.args) ? t.args : {} })) : []);
+    const v2Steps = entries
+      .filter((s) => safeString(s.tool).trim())
+      .map((s) => normalizeStepV2(s, tools));
+    return {
+      ...p,
+      plannerV2: {
+        confidence: normalizeConfidence(p?.confidence, 0.5),
+        steps: v2Steps,
+      },
+    };
+  }
+
+  _enforceExplicitUserArgs({ plan = null, tools = [], userRequest = "" } = {}) {
+    const p = isPlainObject(plan) ? plan : {};
+    const status = safeString(p.status).trim();
+    if (!["ready", "next_step", "missing_args"].includes(status)) return { ok: true };
+    const entries = status === "next_step"
+      ? [{ name: safeString(p?.step?.tool).trim(), args: isPlainObject(p?.step?.args) ? p.step.args : {} }]
+      : (Array.isArray(p.tools) ? p.tools : []);
+    for (const entry of entries) {
+      const toolName = safeString(entry?.name).trim();
+      if (!toolName) continue;
+      const args = isPlainObject(entry?.args) ? entry.args : {};
+      const schema = toolSchemaForName(tools, toolName);
+      const explicitBooleans = extractExplicitBooleanArgsFromRequest(userRequest, schema);
+      for (const [key, value] of Object.entries(explicitBooleans)) {
+        if (!Object.prototype.hasOwnProperty.call(args, key)) args[key] = value;
+        if (typeof args[key] !== "boolean") {
+          args[key] = Boolean(args[key]);
+        }
+        if (args[key] !== value) {
+          args[key] = value;
+        }
+      }
+    }
+    return { ok: true };
+  }
+
+  _enforcePrimaryIntentAlignment({ plan = null, tools = [], userRequest = "" } = {}) {
+    const p = isPlainObject(plan) ? plan : {};
+    const status = safeString(p.status).trim();
+    if (status !== "next_step") return { ok: true };
+    if (hasSequencingHint(userRequest)) return { ok: true };
+    const primaryVerb = findPrimaryRequestVerb(userRequest);
+    if (!primaryVerb) return { ok: true };
+    const stepTool = safeString(p?.step?.tool).trim();
+    if (!stepTool) return { ok: true };
+    const inventoryHasVerbTool = (Array.isArray(tools) ? tools : []).some((t) =>
+      toolNameSupportsVerb(safeString(t?.name).trim(), primaryVerb)
+    );
+    if (!inventoryHasVerbTool) return { ok: true };
+    if (toolNameSupportsVerb(stepTool, primaryVerb)) return { ok: true };
+    return {
+      ok: false,
+      error: `Planner selected non-primary step "${stepTool}" while request primary intent is "${primaryVerb}".`,
+    };
   }
 
   _hasSessionProjectPath(sessionContext) {
@@ -571,7 +951,17 @@ export class ToolPlanner {
           if (!hasSessionPath) missing.add(slot);
           continue;
         }
-        if (role === "semantic_ref") {
+        const slotLower = safeString(slot).toLowerCase();
+        const slotLooksRef =
+          slotLower.includes("scene") ||
+          slotLower.includes("script") ||
+          slotLower.includes("resource") ||
+          slotLower.includes("file") ||
+          slotLower.includes("node") ||
+          slotLower.includes("artifact") ||
+          slotLower.includes("texture") ||
+          slotLower.endsWith("ref");
+        if (role === "semantic_ref" || slotLooksRef) {
           if (!hasValue && hintList.length > 0) {
             const slotKind = safeString(slot).toLowerCase().includes("scene")
               ? "scene"
@@ -593,17 +983,7 @@ export class ToolPlanner {
           if (!hasValue) missing.add(slot);
           continue;
         }
-        if (role === "creation_intent_derived") {
-          if (hasValue) continue;
-          const syn = synthesizeMissingCreationPath(key, args);
-          if (!syn?.ok) {
-            missing.add(mapCreationSynthesisReasonToMissingField(syn?.reason, slot));
-          }
-          continue;
-        }
-        if (role === "direct_user_value") {
-          if (!hasValue) missing.add(slot);
-        }
+        if (!hasValue) missing.add(slot);
       }
     }
 
@@ -674,11 +1054,11 @@ export class ToolPlanner {
     }
     const requestPlannerJson = async (plannerPrompt, phase = "primary") => {
       if (this._debug) {
-        console.log("[generic-mcp][tool-planner][model-input]", {
-          phase,
-          responseFormat: "json_object",
-          promptPreview: safeString(plannerPrompt).slice(0, 4000),
-        });
+        // console.log("[generic-mcp][tool-planner][model-input]", {
+        //   phase,
+        //   responseFormat: "json_object",
+        //   promptPreview: safeString(plannerPrompt).slice(0, 4000),
+        // });
       }
       const res = await this._modelClient.generate({
         prompt: plannerPrompt,
@@ -702,6 +1082,31 @@ export class ToolPlanner {
         return { ok: false, error: safeString(retryErr?.message ?? retryErr) || "Planner model call failed." };
       }
     }
+  }
+
+  async _runCriticPass({ candidatePlan = null, userRequest = "", sessionContext = {}, workflowState = {}, plannerCatalog = [], tools = [] } = {}) {
+    const candidate = isPlainObject(candidatePlan) ? candidatePlan : null;
+    if (!candidate) return { ok: false, error: "Planner critic requires candidate plan." };
+    const prompt = buildCriticPrompt({
+      userRequest,
+      sessionContext,
+      workflowState,
+      toolInventory: Array.isArray(plannerCatalog) ? plannerCatalog : [],
+      candidatePlan: candidate,
+    });
+    const criticRaw = await this._runModel(prompt);
+    if (!criticRaw.ok) {
+      const fallback = this.validatePlan(candidate, tools, { sessionContext, userRequest });
+      if (!fallback.ok) return { ok: false, error: fallback.error || "Planner critic failed and fallback validation rejected candidate." };
+      return { ok: true, plan: fallback.plan };
+    }
+    const validated = this.validatePlan(criticRaw.parsed, tools, { sessionContext, userRequest });
+    if (!validated.ok) {
+      const fallback = this.validatePlan(candidate, tools, { sessionContext, userRequest });
+      if (!fallback.ok) return { ok: false, error: validated.error || "Planner critic produced invalid plan." };
+      return { ok: true, plan: fallback.plan };
+    }
+    return { ok: true, plan: validated.plan };
   }
 
   async _readPromptTemplate() {

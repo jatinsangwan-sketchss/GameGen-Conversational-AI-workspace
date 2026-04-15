@@ -20,11 +20,11 @@ Given a natural-language request, the runtime:
 - `generic-mcp/run-generic-mcp-server.js`
   HTTP sidecar entrypoint, runtime wiring, startup warmup.
 - `generic-mcp/api/GenericMcpHttpServer.js`
-  HTTP transport + route handling (`/health`, `/ready`, `/run`, `/runlocal`, `/resume`).
+  HTTP transport + route handling (`/health`, `/ready`, `/run`, `/runlocal`).
 - `generic-mcp/api/GenericMcpHttpAdapter.js`
   Payload validation, session lifecycle mapping, compact/full response shaping.
 - `generic-mcp/api/GenericMcpSessionStore.js`
-  In-memory session + pending `needs_input` state.
+  In-memory run/session state for API requests.
 - `generic-mcp/GenericMcpRunner.js`
   Core orchestrator/state machine (queueing, planning loop, fallback gates, completion).
 - `generic-mcp/ToolPlanner.js`
@@ -45,10 +45,6 @@ Given a natural-language request, the runtime:
   Generic path/resource matching over index.
 - `generic-mcp/NodeResolver.js`
   Scene-node discovery support for node-targeted operations.
-- `generic-mcp/ContentGenerationStage.js`
-  Generated content/rewrite stage used when planner needs content artifacts.
-- `generic-mcp/PostconditionVerifier.js`
-  Workflow-level expected-effect verification.
 - `generic-mcp/ResultPresenter.js`
   User-facing presentation synthesis from execution results.
 - `generic-mcp/config/genericMcpServer.config.js`
@@ -76,20 +72,13 @@ Given a natural-language request, the runtime:
    - Execute via `Executor`.
    - Perform verification/postconditions.
 4. If unresolved or failed and fallback enabled, attempt `TextEditFallbackStage`.
-5. Return `completed | needs_input | paused | failed | unsupported`.
-6. Persist pending continuation in session store when applicable.
-
-## C) Resume (`/resume`)
-
-1. Validate `sessionId` and pending state exists.
-2. Continue same workflow state from paused/needs-input checkpoint.
-3. Return updated compact/full result.
+5. Return `completed | failed | unsupported`.
 
 ## Links Between Components (Who Calls What)
 
 1. `run-generic-mcp-server.js` -> creates `GenericMcpHttpServer` + `GenericMcpHttpAdapter` + `GenericMcpRunner` instances.
 2. `GenericMcpHttpServer` -> routes requests to `GenericMcpHttpAdapter`.
-3. `GenericMcpHttpAdapter.handleRun/handleResume` -> calls `GenericMcpRunner.run(...)`.
+3. `GenericMcpHttpAdapter.handleRun` -> calls `GenericMcpRunner.run(...)`.
 4. `GenericMcpRunner` -> uses:
    - `SessionManager` (readiness)
    - `ToolInventory` (live tools)
@@ -150,24 +139,9 @@ Run using **local** model config.
 
 Request shape same as `/run`.
 
-## `POST /resume`
-
-Resume paused/needs-input session.
-
-Request:
-```json
-{
-  "sessionId": "required",
-  "input": "required",
-  "projectPath": "optional",
-  "responseMode": "compact|full (optional)"
-}
-```
-
 Common HTTP errors:
 - `400` invalid payload / missing required field / invalid JSON
 - `404` route not found or session not found
-- `409` resume with no pending state
 - `413` body too large
 - `415` unsupported content type
 
@@ -204,7 +178,6 @@ curl -s http://127.0.0.1:4318/health
 curl -s "http://127.0.0.1:4318/ready?projectPath=/absolute/path"
 curl -s http://127.0.0.1:4318/runlocal -H "Content-Type: application/json" -d '{"input":"..."}'
 curl -s http://127.0.0.1:4318/run -H "Content-Type: application/json" -d '{"input":"..."}'
-curl -s http://127.0.0.1:4318/resume -H "Content-Type: application/json" -d '{"sessionId":"...","input":"..."}'
 ```
 
 ## LLD (Low-Level Design)
@@ -243,7 +216,7 @@ Core step loop in `GenericMcpRunner`:
 2. Resolve
 3. Execute
 4. Verify postconditions
-5. Continue until done/safety bound/failure/needs-input
+5. Continue until done/safety bound/failure
 
 ## Debug and Flags
 

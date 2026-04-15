@@ -4,11 +4,10 @@
  * Generic planner/resolver boundary metadata for live MCP tool arguments.
  *
  * Roles:
- * - session_injected         : supplied by active session context (e.g. projectPath)
- * - semantic_ref             : user-provided semantic reference (sceneRef/nodeRef/fileRef/...)
- * - creation_intent_derived  : output path that can be derived from creation intent
- * - direct_user_value        : user must provide concrete value directly
- * - optional                 : not required by MCP schema
+ * - session_injected  : supplied by active session context (e.g. projectPath)
+ * - semantic_ref      : user-provided semantic reference (sceneRef/nodeRef/fileRef/...)
+ * - direct_user_value : user must provide concrete value directly
+ * - optional          : not required by MCP schema
  */
 
 function safeString(value) {
@@ -21,14 +20,6 @@ function isPlainObject(value) {
 
 function normalizeKey(key) {
   return safeString(key).toLowerCase().replace(/[^a-z0-9_]/g, "");
-}
-
-function words(input) {
-  return safeString(input)
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .map((x) => x.trim())
-    .filter(Boolean);
 }
 
 function isSessionInjectedKey(nk) {
@@ -79,40 +70,6 @@ function isPathLikeKey(nk) {
     nk === "path" ||
     nk.endsWith("path")
   );
-}
-
-function toolHints(toolName, inputSchema) {
-  const toks = [
-    ...words(toolName),
-    ...words(inputSchema?.title),
-    ...words(inputSchema?.description),
-  ];
-  const tokenSet = new Set(toks);
-  const createLike = toks.some((t) =>
-    ["create", "new", "save", "write", "generate", "export", "scaffold", "init"].includes(t)
-  );
-  return {
-    createLike,
-    mentionsScene: tokenSet.has("scene") || tokenSet.has("scenes"),
-    mentionsNode: tokenSet.has("node") || tokenSet.has("nodes"),
-    tokens: tokenSet,
-  };
-}
-
-function shouldTreatAsCreationOutputPath(nk, hints) {
-  if (!hints.createLike) return false;
-  if (nk.includes("scriptpath")) return true;
-  if (nk.includes("resourcepath")) return true;
-  if (nk.includes("texturepath")) return true;
-  if (nk.includes("filepath") || nk === "path") return true;
-  if (nk.includes("scenepath")) {
-    // Scene paths are derivable for create/new/save scene flows, but not for
-    // node-edit flows that happen "in scene X".
-    if (!hints.mentionsScene) return false;
-    if (hints.mentionsNode && !hints.tokens.has("save")) return false;
-    return true;
-  }
-  return nk.endsWith("path") && !isNodeTargetKey(nk) && !isSessionInjectedKey(nk);
 }
 
 export function semanticSlotForArg(argName) {
@@ -191,11 +148,7 @@ export function classifyArgRole({ argName, required = false, toolName = "", inpu
     return { argName: raw, normalizedName: nk, required: true, role: "semantic_ref", semanticSlot: semanticSlotForArg(raw) };
   }
   if (isPathLikeKey(nk) || isNodeTargetKey(nk)) {
-    const hints = toolHints(toolName, inputSchema);
-    const role = shouldTreatAsCreationOutputPath(nk, hints)
-      ? "creation_intent_derived"
-      : "semantic_ref";
-    return { argName: raw, normalizedName: nk, required: true, role, semanticSlot: semanticSlotForArg(raw) };
+    return { argName: raw, normalizedName: nk, required: true, role: "semantic_ref", semanticSlot: semanticSlotForArg(raw) };
   }
   return { argName: raw, normalizedName: nk, required: true, role: "direct_user_value", semanticSlot: semanticSlotForArg(raw) };
 }

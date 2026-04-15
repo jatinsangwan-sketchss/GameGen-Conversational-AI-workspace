@@ -116,6 +116,7 @@ export async function createGenericMcpSidecarRuntime({ argv = [], env = process.
     resourceResolver,
     modelClient: localModelClient,
     mcpConfig,
+    disableContentSynthesis: config.disableContentSynthesis,
     debug: config.debug,
   });
   const onlineRunner = new GenericMcpRunner({
@@ -129,6 +130,7 @@ export async function createGenericMcpSidecarRuntime({ argv = [], env = process.
     resourceResolver,
     modelClient: onlineModelClient,
     mcpConfig,
+    disableContentSynthesis: config.disableContentSynthesis,
     debug: config.debug,
   });
 
@@ -258,4 +260,3 @@ if (isMainModule()) {
     process.exit(1);
   });
 }
-

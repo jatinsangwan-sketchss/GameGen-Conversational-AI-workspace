@@ -981,7 +981,7 @@ export class TextEditFallbackStage {
       };
     }
 
-    let candidate = finalApply.content;
+    const candidate = finalApply.content;
     const preValidate = await this._validateContent({
       extension: ext,
       content: candidate,
@@ -990,31 +990,22 @@ export class TextEditFallbackStage {
       performSceneProbe: false,
     });
     if (!preValidate.ok) {
-      const repaired = await this._attemptRepair({
-        extension: ext,
+      this._debugLog("validate:failed-pre", {
         targetPath: rel,
-        invalidContent: candidate,
+        reason: preValidate.reason,
         issues: preValidate.issues,
       });
-      if (!repaired.ok) {
-        this._debugLog("validate:failed-pre", {
+      return {
+        ok: false,
+        reason: `fallback_validation_failed: ${preValidate.reason}`,
+        fallback: {
+          attempted: true,
           targetPath: rel,
-          reason: preValidate.reason,
-          issues: preValidate.issues,
-        });
-        return {
-          ok: false,
-          reason: `fallback_validation_failed: ${preValidate.reason}`,
-          fallback: {
-            attempted: true,
-            targetPath: rel,
-            stage: "validate",
-            operations: finalPlan.operations,
-            validation: preValidate,
-          },
-        };
-      }
-      candidate = repaired.content;
+          stage: "validate",
+          operations: finalPlan.operations,
+          validation: preValidate,
+        },
+      };
     }
 
     let method = "local_fs";
@@ -1200,35 +1191,6 @@ export class TextEditFallbackStage {
       };
     } catch (err) {
       return { ok: false, reason: `fallback_plan_generate_failed: ${safeString(err?.message ?? err)}`, operations: [] };
-    }
-  }
-
-  async _attemptRepair({ extension, targetPath, invalidContent, issues = [] }) {
-    if (!this._modelClient || typeof this._modelClient.generate !== "function") {
-      return { ok: false, reason: "fallback_repair_model_unavailable", content: invalidContent };
-    }
-    const prompt = [
-      "Repair this file so it passes strict validation.",
-      "Return only raw file text, no markdown fences.",
-      `targetPath: ${safeString(targetPath).trim()}`,
-      `targetExtension: ${safeString(extension).trim()}`,
-      `issues: ${JSON.stringify(Array.isArray(issues) ? issues : [])}`,
-      "invalidContent:",
-      safeString(invalidContent),
-    ].join("\n");
-    this._debugLog("repair:model-input", {
-      targetPath: safeString(targetPath).trim() || null,
-      extension: safeString(extension).trim() || null,
-      issues: Array.isArray(issues) ? issues : [],
-      promptPreview: safeString(prompt).slice(0, 4000),
-    });
-    try {
-      const raw = await this._modelClient.generate({ prompt, responseFormat: "text" });
-      const text = safeString(raw?.text ?? raw).trim();
-      if (!text) return { ok: false, reason: "fallback_repair_empty_output", content: invalidContent };
-      return { ok: true, reason: null, content: text };
-    } catch (err) {
-      return { ok: false, reason: `fallback_repair_failed: ${safeString(err?.message ?? err)}`, content: invalidContent };
     }
   }
 

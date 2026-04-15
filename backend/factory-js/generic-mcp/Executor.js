@@ -46,6 +46,17 @@ function extractInputSchema(tool) {
   return {};
 }
 
+function extractSchemaArgKeys(inputSchema = {}) {
+  const schema = isPlainObject(inputSchema) ? inputSchema : {};
+  const properties = isPlainObject(schema.properties)
+    ? Object.keys(schema.properties).map((k) => safeString(k).trim()).filter(Boolean)
+    : [];
+  const required = Array.isArray(schema.required)
+    ? schema.required.map((k) => safeString(k).trim()).filter(Boolean)
+    : [];
+  return [...new Set([...properties, ...required])];
+}
+
 function parseFailureText(rawResult) {
   if (rawResult == null) return "MCP tool reported failure.";
   if (typeof rawResult === "string") return rawResult;
@@ -240,12 +251,23 @@ function sleep(ms) {
 }
 
 export class Executor {
-  constructor({ sessionManager = null, toolInventory = null, fileIndex = null, debug = false } = {}) {
+  constructor({
+    sessionManager = null,
+    toolInventory = null,
+    fileIndex = null,
+    debug = false,
+    enableGenericReadbackVerification = null,
+  } = {}) {
     this._sessionManager = sessionManager ?? null;
     this._toolInventory = toolInventory ?? null;
     this._fileIndex = fileIndex ?? null;
     this._artifactRegistry = new ArtifactRegistry();
     this._debug = Boolean(debug) || safeString(process.env.DEBUG_GENERIC_MCP_EXECUTOR).toLowerCase() === "true";
+    const envToggle = safeString(process.env.GENERIC_MCP_ENABLE_READBACK_VERIFICATION).trim().toLowerCase();
+    this._enableGenericReadbackVerification =
+      typeof enableGenericReadbackVerification === "boolean"
+        ? enableGenericReadbackVerification
+        : envToggle === "true";
   }
 
   async execute(resolvedPlan, { sessionStatus = null, inventory = null, artifactRegistry = null, workflowState = null } = {}) {
@@ -304,45 +326,44 @@ export class Executor {
       };
     }
 
+    const incomingArgs = toArgs(args);
+    const schemaArgs = extractSchemaArgKeys(extractInputSchema(tool));
+    const pruned = this._pruneArgsToSchema({
+      toolName,
+      args: incomingArgs,
+      schemaArgs,
+    });
+    const callArgs = pruned.args;
+    if (this._debug && pruned.droppedKeys.length > 0) {
+      console.log("[GenericMCP][Executor][DEBUG] pruned unknown args", {
+        tool: toolName,
+        droppedKeys: pruned.droppedKeys,
+      });
+    }
+
     const required = normalizeRequired(extractInputSchema(tool));
-    const missing = required.filter((k) => args?.[k] == null || safeString(args[k]).trim() === "");
+    const missing = required.filter((k) => callArgs?.[k] == null || safeString(callArgs[k]).trim() === "");
     if (missing.length > 0) {
       return {
         ok: false,
         tool: toolName,
-        args: toArgs(args),
+        args: callArgs,
         rawResult: null,
         error: `Missing required args for ${toolName}: ${missing.join(", ")}`,
       };
     }
 
-    const payload = this.buildPayload({ toolName, args: toArgs(args) });
-    const expectsCreation = this._expectsArtifactCreation({ toolName, workflowState });
-    const genericReadbackPlan = this._planGenericReadback({
-      toolName,
-      mutationArgs: toArgs(args),
-      inventory,
-    });
-    const strictMutationVerification =
-      this._isMutationLikeCall({ toolName, args: toArgs(args) }) &&
-      !this._isAttachLikeMutation({ toolName, args: toArgs(args) });
-    if (!expectsCreation && strictMutationVerification && safeString(genericReadbackPlan?.reason).trim() === "readback_args_unavailable") {
-      return {
-        ok: false,
-        tool: toolName,
-        args: toArgs(args),
-        rawResult: null,
-        error: "Mutation verification unavailable: read-back tool exists but required read arguments could not be compiled.",
-        verification: {
-          readback: {
-            enabled: false,
-            reason: "readback_args_unavailable",
-          },
-        },
-      };
-    }
+    const payload = this.buildPayload({ toolName, args: callArgs });
+    const expectsCreation = this._expectsArtifactCreation({ toolName, tool, args: callArgs, workflowState });
+    const genericReadbackPlan = this._enableGenericReadbackVerification
+      ? this._planGenericReadback({
+        toolName,
+        mutationArgs: callArgs,
+        inventory,
+      })
+      : { enabled: false, reason: "readback_verification_disabled" };
     let preMutationReadback = null;
-    if (genericReadbackPlan?.enabled && !expectsCreation) {
+    if (this._enableGenericReadbackVerification && genericReadbackPlan?.enabled && !expectsCreation) {
       preMutationReadback = await this._runGenericReadback({
         client,
         readTool: genericReadbackPlan.readTool,
@@ -353,7 +374,7 @@ export class Executor {
         return {
           ok: false,
           tool: toolName,
-          args: toArgs(args),
+          args: callArgs,
           rawResult: null,
           error: preMutationReadback.reason || "Pre-mutation read-back failed.",
           verification: {
@@ -369,14 +390,14 @@ export class Executor {
       }
       const preIdempotency = this._evaluatePreMutationIdempotency({
         toolName,
-        mutationArgs: toArgs(args),
+        mutationArgs: callArgs,
         preRaw: preMutationReadback.raw,
       });
       if (preIdempotency.skipExecution) {
         return {
           ok: true,
           tool: toolName,
-          args: toArgs(args),
+          args: callArgs,
           rawResult: preMutationReadback.raw,
           error: null,
           outcome: safeString(preIdempotency.outcome).trim() || "already_satisfied",
@@ -399,7 +420,7 @@ export class Executor {
         return {
           ok: false,
           tool: toolName,
-          args: toArgs(args),
+          args: callArgs,
           rawResult: preMutationReadback.raw,
           error: missingIdentity
             ? `Mutation blocked by pre-check: additive identity missing required field(s): ${outcomeReason.slice("precheck_identity_unavailable:".length)}.`
@@ -419,7 +440,7 @@ export class Executor {
         };
       }
     }
-    const verifyArgs = toArgs(args);
+    const verifyArgs = callArgs;
     const semanticState = isPlainObject(workflowState?.semanticState) ? workflowState.semanticState : {};
     const arrayLenOrNull = (v) => (Array.isArray(v) ? v.length : null);
     if (this._debug) {
@@ -453,19 +474,19 @@ export class Executor {
     if (this._debug) {
       console.log("[GenericMCP][Executor] execute", {
         tool: toolName,
-        argKeys: Object.keys(toArgs(args)),
-        argsPreview: toArgs(args),
+        argKeys: Object.keys(callArgs),
+        argsPreview: callArgs,
       });
     }
     // console.log("[Executor] payload ", payload);
 
-    const rawResult = await this._callTool(client, { toolName, args: toArgs(args), payload });
+    const rawResult = await this._callTool(client, { toolName, args: callArgs, payload });
     let ok = isRawResultOk(rawResult);
     let error = ok ? null : this.extractFailureText(rawResult);
     if (!ok) {
       const recoverableCreateCollision = await this._isRecoverableCreateCollision({
         toolName,
-        args: toArgs(args),
+        args: callArgs,
         rawResult,
         errorText: error,
         workflowState,
@@ -478,7 +499,7 @@ export class Executor {
     if (ok) {
       const creationVerification = await this._verifyArtifactFilesExist({
         toolName,
-        args: toArgs(args),
+        args: callArgs,
         rawResult,
         workflowState,
       });
@@ -490,7 +511,7 @@ export class Executor {
     if (ok) {
       await this._normalizeCreatedGdscriptHeaders({
         toolName,
-        args: toArgs(args),
+        args: callArgs,
         rawResult,
         workflowState,
       });
@@ -498,7 +519,7 @@ export class Executor {
     if (ok) {
       const attachVerification = await this._verifyAttachApplied({
         toolName,
-        args: toArgs(args),
+        args: callArgs,
         rawResult,
         client,
         inventory,
@@ -510,10 +531,10 @@ export class Executor {
       }
     }
     let genericReadbackVerification = { ok: true };
-    if (ok) {
+    if (ok && this._enableGenericReadbackVerification) {
       genericReadbackVerification = await this._verifyMutationViaReadback({
         toolName,
-        args: toArgs(args),
+        args: callArgs,
         rawResult,
         client,
         inventory,
@@ -544,25 +565,26 @@ export class Executor {
         // eslint-disable-next-line no-console
         console.log("[GenericMCP][Executor] success", { tool: toolName });
       }
-      artifactRegistry?.registerFromExecution?.({ toolName, args: toArgs(args), rawResult });
-      await this._updateProjectIndexAfterMutation({ toolName, args: toArgs(args), rawResult });
+      artifactRegistry?.registerFromExecution?.({ toolName, args: callArgs, rawResult });
+      await this._updateProjectIndexAfterMutation({ toolName, args: callArgs, rawResult });
     }
 
     return {
       ok,
       tool: toolName,
-      args: toArgs(args),
+      args: callArgs,
       rawResult,
       error,
       outcome: safeString(genericReadbackVerification?.outcome).trim() || null,
       outcomeReason: safeString(genericReadbackVerification?.reason).trim() || null,
       verification: {
         readback: {
-          enabled: Boolean(genericReadbackPlan?.enabled),
+          enabled: Boolean(this._enableGenericReadbackVerification && genericReadbackPlan?.enabled),
           readTool: safeString(genericReadbackPlan?.readTool?.name).trim() || null,
-          preOk: Boolean(preMutationReadback?.ok),
-          postOk: Boolean(genericReadbackVerification?.ok),
+          preOk: this._enableGenericReadbackVerification ? Boolean(preMutationReadback?.ok) : null,
+          postOk: this._enableGenericReadbackVerification ? Boolean(genericReadbackVerification?.ok) : null,
           readArgs: isPlainObject(genericReadbackPlan?.readArgs) ? genericReadbackPlan.readArgs : null,
+          reason: safeString(genericReadbackPlan?.reason).trim() || null,
         },
       },
     };
@@ -597,6 +619,25 @@ export class Executor {
       });
     }
     return { args: coerced.args };
+  }
+
+  _pruneArgsToSchema({ toolName = "", args = {}, schemaArgs = [] } = {}) {
+    const input = toArgs(args);
+    const allowed = new Set((Array.isArray(schemaArgs) ? schemaArgs : []).map((k) => safeString(k).trim()).filter(Boolean));
+    if (allowed.size < 1) return { args: input, droppedKeys: [] };
+    const out = {};
+    const droppedKeys = [];
+    for (const [key, value] of Object.entries(input)) {
+      if (allowed.has(key)) out[key] = value;
+      else droppedKeys.push(key);
+    }
+    if (this._debug && droppedKeys.length > 0) {
+      console.log("[GenericMCP][Executor][DEBUG] schema allowlist applied", {
+        tool: safeString(toolName).trim() || null,
+        allowedKeys: [...allowed],
+      });
+    }
+    return { args: out, droppedKeys };
   }
 
   async _resolveInventory(inventoryArg) {
@@ -696,12 +737,22 @@ export class Executor {
     };
   }
 
-  _expectsArtifactCreation({ toolName, workflowState }) {
+  _expectsArtifactCreation({ toolName, tool = null, args = {}, workflowState }) {
     const expected = workflowState?.artifactOperation?.expectedEffects;
     if (isPlainObject(expected) && typeof expected.artifactCreated === "boolean") {
       return expected.artifactCreated;
     }
-    return /create|new|generate|scaffold|save|write/i.test(safeString(toolName));
+    const a = toArgs(args);
+    if (a.create === true || a.isCreate === true || a.isNew === true) return true;
+    const schema = extractInputSchema(tool);
+    const schemaKeys = [
+      ...(Array.isArray(schema.required) ? schema.required : []),
+      ...(isPlainObject(schema.properties) ? Object.keys(schema.properties) : []),
+    ].map((k) => normalizeKey(k));
+    if (schemaKeys.some((k) => k.includes("new") || k.includes("create") || k.includes("targetfolder") || k.includes("requestedname"))) {
+      return true;
+    }
+    return false;
   }
 
   _resolveProjectRootForVerification(args = {}) {
@@ -876,10 +927,33 @@ export class Executor {
     return looksAttachToolName(toolName) || hasScriptPropertyHint(args);
   }
 
-  _isMutationLikeCall({ toolName = "", args = {} } = {}) {
+  _isMutationLikeCall({ toolName = "", args = {}, tool = null, workflowState = null } = {}) {
     const a = toArgs(args);
     if (this._isAttachLikeMutation({ toolName, args: a })) return true;
-    if (isLikelyMutationToolName(toolName)) return true;
+    const expected = isPlainObject(workflowState?.artifactOperation?.expectedEffects)
+      ? workflowState.artifactOperation.expectedEffects
+      : null;
+    if (isPlainObject(expected) && (expected.artifactModified === true || expected.artifactCreated === true)) {
+      return true;
+    }
+    const schema = extractInputSchema(tool);
+    const schemaKeys = [
+      ...(Array.isArray(schema.required) ? schema.required : []),
+      ...(isPlainObject(schema.properties) ? Object.keys(schema.properties) : []),
+    ].map((k) => normalizeKey(k));
+    const schemaSuggestsMutation = schemaKeys.some((k) =>
+      k.includes("properties") ||
+      k.includes("propertymap") ||
+      k.includes("props") ||
+      k.includes("content") ||
+      k.includes("code") ||
+      k.includes("replacement") ||
+      k.includes("insert") ||
+      k.includes("delete") ||
+      k.includes("new") ||
+      k.includes("create")
+    );
+    if (schemaSuggestsMutation) return true;
     const hasPropertyPayload =
       isPlainObject(a.properties) ||
       isPlainObject(a.propertyMap) ||
@@ -887,7 +961,9 @@ export class Executor {
       typeof a.properties === "string" ||
       typeof a.propertyMap === "string" ||
       typeof a.props === "string";
-    return hasPropertyPayload;
+    if (hasPropertyPayload) return true;
+    if (a.create === true || a.isCreate === true || a.isNew === true || a.overwrite === true) return true;
+    return isLikelyMutationToolName(toolName);
   }
 
   _collectDomainTokensFromArgs(args = {}) {
@@ -904,6 +980,7 @@ export class Executor {
       if (nk.includes("property") || nk.includes("props")) out.add("property");
       if (nk.includes("setting")) out.add("setting");
       if (nk.includes("input")) out.add("input");
+      if (nk.includes("animation") || nk.includes("anim")) out.add("animation");
       if (nk.includes("project")) out.add("project");
       if (nk === "path" || nk.endsWith("path")) out.add("path");
     };
@@ -914,7 +991,7 @@ export class Executor {
   _scoreReadToolCandidate({ mutationToolName = "", mutationArgs = {}, readTool = null } = {}) {
     if (!isPlainObject(readTool)) return -1;
     const name = safeString(readTool.name).trim();
-    if (!name || !isLikelyReadOnlyToolName(name)) return -1;
+    if (!name) return -1;
     const mutationTokens = new Set([
       ...tokenizeIdentity(mutationToolName),
       ...this._collectDomainTokensFromArgs(mutationArgs),
@@ -926,14 +1003,40 @@ export class Executor {
       ...(isPlainObject(schema.properties) ? Object.keys(schema.properties) : []),
     ];
     for (const k of keys) readTokens.add(normalizeKey(k));
+    const schemaKeys = keys.map((k) => normalizeKey(k));
+    const schemaLooksWriteOnly = keys.some((raw) => {
+      const r = safeString(raw).trim().toLowerCase();
+      const n = normalizeKey(raw);
+      if (!r && !n) return false;
+      if (n.includes("properties") || n.includes("propertymap") || n.includes("props")) return true;
+      if (n.includes("replacement") || n.includes("insert") || n.includes("delete")) return true;
+      return /(?:^|[_-])(set|update|modify|patch|add|remove|delete|insert|replace)(?:[_-]|$)/.test(r);
+    });
+    const schemaLooksRead = schemaKeys.some((k) =>
+      k.includes("scene") ||
+      k.includes("node") ||
+      k.includes("path") ||
+      k.includes("query") ||
+      k.includes("name") ||
+      k.includes("animation")
+    );
+    const nameLooksRead = isLikelyReadOnlyToolName(name);
+    const nameLooksMutation = isLikelyMutationToolName(name);
+    if (nameLooksMutation && !nameLooksRead) return -1;
+    if (schemaLooksWriteOnly) return -1;
+    if (!nameLooksRead && !schemaLooksRead) return -1;
     let score = 0;
     for (const token of mutationTokens) {
       if (readTokens.has(token)) score += 2;
       if ([...readTokens].some((t) => safeString(t).includes(token))) score += 1;
     }
+    const mutationNameTokens = new Set(tokenizeIdentity(mutationToolName));
+    if (mutationNameTokens.has("animation")) mutationTokens.add("animation");
     if (readTokens.has("scene") && mutationTokens.has("scene")) score += 2;
     if (readTokens.has("node") && mutationTokens.has("node")) score += 2;
     if (readTokens.has("setting") && mutationTokens.has("setting")) score += 2;
+    if (readTokens.has("animation") && mutationTokens.has("animation")) score += 6;
+    if (mutationTokens.has("animation") && !readTokens.has("animation")) score -= 8;
     const hasPropertyPayload =
       isPlainObject(mutationArgs?.properties) ||
       isPlainObject(mutationArgs?.propertyMap) ||
@@ -974,7 +1077,10 @@ export class Executor {
   }
 
   _planGenericReadback({ toolName = "", mutationArgs = {}, inventory = null } = {}) {
-    if (!this._isMutationLikeCall({ toolName, args: mutationArgs })) {
+    const mutationTool = inventory && typeof inventory.getTool === "function"
+      ? inventory.getTool(toolName)
+      : null;
+    if (!this._isMutationLikeCall({ toolName, args: mutationArgs, tool: mutationTool })) {
       return { enabled: false, reason: "not_mutation_like" };
     }
     if (this._isAttachLikeMutation({ toolName, args: mutationArgs })) {
@@ -1032,12 +1138,13 @@ export class Executor {
     const a = toArgs(mutationArgs);
     const groups = [
       ["scenePath", "scene_path", "sceneRef", "scene", "path"],
-      ["nodePath", "targetNodePath", "targetNode", "nodeRef", "targetNodeRef", "parentPath"],
+      ["nodePath", "targetNodePath", "targetNode", "nodeRef", "targetNodeRef", "parentPath", "playerNodePath", "player_node_path", "animationPlayerPath", "animation_player_path"],
       ["scriptPath", "scriptRef", "filePath", "fileRef", "resourcePath", "resourceRef", "artifactRef", "path"],
       ["propertyName", "property", "key", "name"],
       ["projectPath", "project_path", "projectRoot", "project_root"],
       ["settingPath", "settingRef", "setting", "key", "path"],
       ["inputMap", "inputAction", "inputName", "name", "key"],
+      ["animationName", "animation_name", "name", "animation", "clipName", "clip_name"],
     ];
     const byCategory = (candidates) => {
       for (const k of candidates) {
@@ -1053,8 +1160,9 @@ export class Executor {
     if (rk.includes("project")) return byCategory(groups[4]);
     if (rk.includes("setting")) return byCategory(groups[5]);
     if (rk.includes("input")) return byCategory(groups[6]);
+    if (rk.includes("animation") || rk.includes("clip")) return byCategory(groups[7]);
     if (rk === "path" || rk.endsWith("path")) return byCategory([...groups[0], ...groups[1], ...groups[2]]);
-    return byCategory([...groups[0], ...groups[1], ...groups[2], ...groups[3], ...groups[5], ...groups[6]]);
+    return byCategory([...groups[0], ...groups[1], ...groups[2], ...groups[3], ...groups[5], ...groups[6], ...groups[7]]);
   }
 
   _buildGenericReadbackArgs({ readTool = null, mutationArgs = {} } = {}) {
@@ -1170,17 +1278,7 @@ export class Executor {
 
   _buildAdditiveMutationIdentity({ mutationArgs = {} } = {}) {
     const a = toArgs(mutationArgs);
-    const nodeName = pickFirstText([
-      a.nodeName,
-      a.childName,
-      a.newNodeName,
-      a.node_name,
-      a.child_name,
-      a.new_node_name,
-      a.name,
-      a.targetName,
-    ]);
-    const nodeType = pickFirstText([
+    const explicitNodeType = pickFirstText([
       a.nodeType,
       a.type,
       a.childType,
@@ -1188,6 +1286,16 @@ export class Executor {
       a.child_type,
       a.targetType,
     ]);
+    const nodeName = pickFirstText([
+      a.nodeName,
+      a.childName,
+      a.newNodeName,
+      a.node_name,
+      a.child_name,
+      a.new_node_name,
+      a.targetName,
+    ]) || (explicitNodeType ? safeString(a.name).trim() : "");
+    const nodeType = explicitNodeType;
     const parentPath = pickFirstText([
       a.parentPath,
       a.parentNodePath,
@@ -1223,6 +1331,39 @@ export class Executor {
       parentPath: safeString(parentPath).trim() || null,
       identityTokens,
     };
+  }
+
+  _isNodeEntityAdditiveMutation({ toolName = "", mutationArgs = {} } = {}) {
+    if (!isLikelyAdditiveMutationToolName(toolName)) return false;
+    const a = toArgs(mutationArgs);
+    const hasNodeEntityHints = [
+      "nodeName",
+      "childName",
+      "newNodeName",
+      "node_name",
+      "child_name",
+      "new_node_name",
+      "nodeType",
+      "childType",
+      "node_type",
+      "child_type",
+      "parentPath",
+      "parentNodePath",
+      "parentNode",
+      "parent",
+      "parentRef",
+      "nodeRef",
+      "targetNodeRef",
+      "nodePath",
+      "targetNodePath",
+    ].some((k) => safeString(a?.[k]).trim().length > 0);
+    if (!hasNodeEntityHints) return false;
+    const identity = this._buildAdditiveMutationIdentity({ mutationArgs: a });
+    return (
+      safeString(identity.nodeName).trim().length > 0 &&
+      safeString(identity.nodeType).trim().length > 0 &&
+      safeString(identity.parentPath).trim().length > 0
+    );
   }
 
   _normalizeNodePathLike(value) {
@@ -1368,7 +1509,7 @@ export class Executor {
     const unchanged = this._readbackFingerprint(preRaw) === this._readbackFingerprint(postRaw);
     if (!unchanged) return { unchanged: false, alreadySatisfied: false };
 
-    if (isLikelyAdditiveMutationToolName(toolName)) {
+    if (this._isNodeEntityAdditiveMutation({ toolName, mutationArgs })) {
       const additiveMatch = this._matchAdditiveIdentityInReadback({
         verifyRaw: preRaw,
         mutationArgs,
@@ -1402,6 +1543,9 @@ export class Executor {
     if (!isLikelyAdditiveMutationToolName(toolName)) {
       return { skipExecution: false, failExecution: false, reason: null, outcome: null };
     }
+    if (!this._isNodeEntityAdditiveMutation({ toolName, mutationArgs })) {
+      return { skipExecution: false, failExecution: false, reason: "precheck_skipped_non_node_entity_additive", outcome: null };
+    }
     const identity = this._buildAdditiveMutationIdentity({ mutationArgs });
     if (this._debug) {
       console.log("[generic-mcp][precheck-debug] identity", {
@@ -1418,9 +1562,9 @@ export class Executor {
     if (missingIdentityFields.length > 0) {
       return {
         skipExecution: false,
-        failExecution: true,
+        failExecution: false,
         reason: `precheck_identity_unavailable:${missingIdentityFields.join(",")}`,
-        outcome: "precheck_conflict",
+        outcome: null,
       };
     }
     const additiveMatch = this._matchAdditiveIdentityInReadback({
@@ -1549,7 +1693,7 @@ export class Executor {
     plannedReadback = null,
     preReadback = null,
   }) {
-    if (!this._isMutationLikeCall({ toolName, args })) return { ok: true };
+    if (!this._isMutationLikeCall({ toolName, args, workflowState })) return { ok: true };
     if (this._isAttachLikeMutation({ toolName, args })) return { ok: true };
     if (!isRawResultOk(rawResult)) return { ok: true };
     const plan = isPlainObject(plannedReadback)

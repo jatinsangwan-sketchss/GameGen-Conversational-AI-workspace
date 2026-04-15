@@ -5,29 +5,18 @@
  *
  * This class is the argument stage only:
  * - inject session/context args
- * - **synthesize new resource paths** for create/new (name + folder + inferred ext)
  * - resolve **existing** file/resource refs (project index)
  * - resolve node refs
  * - validate required args
  *
- * Existing refs vs new paths: path-like args (`scenePath`, `filePath`, …) are either
- * looked up or synthesized — see PathSynthesizer (generic, not per-tool switches).
+ * Existing refs vs output paths: path-like args (`scenePath`, `filePath`, …) are
+ * treated as existing refs by default, with explicit output targets exempted by policy.
  *
  * It does NOT execute tools or format results.
  */
 
-import {
-  isCreatablePathArgName,
-  sanitizeFileStem,
-  synthesizeMissingCreationPath,
-} from "./PathSynthesizer.js";
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { defaultPathPolicyForArg } from "./PathPolicy.js";
+import { defaultPathPolicyForArg, isExplicitOutputPathArg } from "./PathPolicy.js";
 import { classifyToolArgs, isNodeRefSlot, semanticArgCandidates } from "./ArgRoleClassifier.js";
-import { mapGeneratedContentIntoInlineSink } from "./ContentSinkResolver.js";
-import { ensureRichPayloadReadiness } from "./RichArgPayloadSynthesizer.js";
 import { getSessionClient } from "./utils/session-client.js";
 
 function safeString(value) {
@@ -120,9 +109,6 @@ export class ArgumentResolver {
     this._debug =
       Boolean(debug) ||
       safeString(process.env.DEBUG_GENERIC_MCP_VERIFY).trim().toLowerCase() === "true";
-    this._godotSchemaIndex = null;
-    this._godotPropertyTypeFallback = null;
-    this._godotSchemaLoaded = false;
   }
 
   _extractResolvedProjectPath(args) {
@@ -205,10 +191,9 @@ export class ArgumentResolver {
       // console.log("[ArgumentResolver] Resolve Args", tool.name, args);
       // Resolution order is strict and explicit:
       // 1) session/context injection
-      // 2) creation-path synthesis (new resources — before index resolution)
-      // 3) existing file/resource refs
-      // 4) node refs
-      // 5) required-arg validation
+      // 2) existing file/resource refs (output-target exceptions handled by policy)
+      // 3) node refs
+      // 4) required-arg validation
       const materialized = this.materializeSemanticAliases({
         toolName: name,
         args,
@@ -216,18 +201,11 @@ export class ArgumentResolver {
       });
       const classified = this.classifyArgs({ toolName: name, args: materialized.args, inventory: liveInventory });
       const withSession = this.injectSessionArgs({ toolName: name, args: materialized.args, sessionStatus: liveSessionStatus, classification: classified });
-      const synthesized = this.synthesizeCreationPaths({
-        toolName: name,
-        args: withSession.args,
-        inventory: liveInventory,
-        workflowState,
-      });
-      const classifiedAfterSynth = this.classifyArgs({ toolName: name, args: synthesized.args, inventory: liveInventory });
+      const classifiedAfterSession = this.classifyArgs({ toolName: name, args: withSession.args, inventory: liveInventory });
       const fileResolved = await this.resolveFileRefs({
         toolName: name,
-        args: synthesized.args,
-        classification: classifiedAfterSynth,
-        synthesizedKeys: synthesized.synthesizedKeys,
+        args: withSession.args,
+        classification: classifiedAfterSession,
         sessionInjectedKeys: withSession.injectedKeys,
         workflowState,
       });
@@ -235,7 +213,7 @@ export class ArgumentResolver {
       const nodeResolved = await this.resolveNodeRefs({
         toolName: name,
         args: fileResolved.args,
-        classification: classifiedAfterSynth,
+        classification: classifiedAfterSession,
         workflowState,
       });
       const validation = this.validateResolvedArgs({
@@ -382,7 +360,6 @@ export class ArgumentResolver {
       }
       if (
         role === "semantic_ref" ||
-        role === "creation_intent_derived" ||
         (role === "optional" && hasProvidedValue && (looksNodeTarget || looksFileRef))
       ) {
         if (looksNodeTarget) {
@@ -405,8 +382,7 @@ export class ArgumentResolver {
       if (hasNonEmpty(out[key])) continue;
       const roleMeta = roleInfo.rolesByArg[key];
       const role = safeString(roleMeta?.role).trim();
-      if (!["semantic_ref", "creation_intent_derived", "direct_user_value"].includes(role)) continue;
-      if (role === "creation_intent_derived") continue;
+      if (!["semantic_ref", "direct_user_value"].includes(role)) continue;
       const slot = safeString(roleMeta?.semanticSlot).trim() || key;
       const candidates = semanticArgCandidates(key, slot);
       const keyNorm = normalizeKey(key);
@@ -451,147 +427,7 @@ export class ArgumentResolver {
     return { args: out, missingArgs, injectedKeys };
   }
 
-  /**
-   * Fills missing required path args from structured creation intent (planner args).
-   * Synthesized keys skip ResourceResolver (non-existent paths are not index lookups).
-   */
-  synthesizeCreationPaths({ toolName, args, inventory = null, workflowState = null } = {}) {
-    const out = { ...(isPlainObject(args) ? args : {}) };
-    const synthesizedKeys = new Set();
-    const schema = this._getToolSchema(toolName, inventory ?? this._toolInventory);
-    const required = this._getRequiredArgs(toolName, inventory ?? this._toolInventory);
-    const props = isPlainObject(schema?.properties) ? Object.keys(schema.properties) : [];
-    const candidates = [...new Set([...required, ...props.filter((k) => isCreatablePathArgName(k))])];
-    for (const key of candidates) {
-      const val = out[key];
-      if (val != null && safeString(val).trim() !== "") continue;
-      if (!isCreatablePathArgName(key)) continue;
-      if (this._isNodeTargetKey(normalizeKey(key))) continue;
-      const syn = synthesizeMissingCreationPath(key, out);
-      if (syn.ok && syn.relativePath) {
-        out[key] = syn.relativePath;
-        synthesizedKeys.add(key);
-        if (this._debug && syn.meta) {
-          console.error(
-            "[generic-mcp][args] path synthesis",
-            JSON.stringify({
-              tool: toolName,
-              synthesizedArg: key,
-              sources: syn.meta.sources,
-              ext: syn.meta.ext,
-              finalPath: syn.meta.finalPath ?? syn.relativePath,
-            })
-          );
-        }
-      }
-    }
-    this._applyCanonicalCreateScriptPathAliases({
-      toolName,
-      args: out,
-      workflowState,
-      schema,
-      required,
-      synthesizedKeys,
-    });
-    return { args: out, synthesizedKeys };
-  }
-
-  _applyCanonicalCreateScriptPathAliases({
-    toolName = "",
-    args = {},
-    workflowState = null,
-    schema = null,
-    required = [],
-    synthesizedKeys = null,
-  } = {}) {
-    const out = isPlainObject(args) ? args : {};
-    const keySet = synthesizedKeys instanceof Set ? synthesizedKeys : new Set();
-    const createLike = this._isCreateLikeArtifactStep({ toolName, args: out, workflowState });
-    if (!createLike) return;
-    const canonical = this._deriveCanonicalScriptCreationPath({ toolName, args: out, workflowState });
-    if (!canonical) return;
-    const schemaProps = isPlainObject(schema?.properties) ? Object.keys(schema.properties) : [];
-    const requiredKeys = Array.isArray(required) ? required : [];
-    const candidateKeys = [...new Set([...Object.keys(out), ...schemaProps, ...requiredKeys])];
-    for (const key of candidateKeys) {
-      const nk = normalizeKey(key);
-      if (!nk || this._isProjectPathKey(nk) || this._isNodeTargetKey(nk)) continue;
-      const isScriptArtifactKey =
-        nk === "path" ||
-        nk.includes("scriptpath") ||
-        nk.includes("filepath") ||
-        nk.includes("artifactpath") ||
-        nk.includes("scriptref") ||
-        nk.includes("fileref") ||
-        nk.includes("artifactref");
-      if (!isScriptArtifactKey) continue;
-      const previous = safeString(out[key]).trim();
-      const previousNormalized = normalizeProjectRelativePath(previous);
-      if (previousNormalized === canonical) continue;
-      out[key] = canonical;
-      keySet.add(key);
-    }
-  }
-
-  _deriveCanonicalScriptCreationPath({ toolName = "", args = {}, workflowState = null } = {}) {
-    const out = isPlainObject(args) ? args : {};
-    const nested = isPlainObject(out.creationIntent) ? out.creationIntent : {};
-    const semanticCreation = isPlainObject(workflowState?.semanticState?.creationIntent)
-      ? workflowState.semanticState.creationIntent
-      : (isPlainObject(workflowState?.semanticIntent?.creationIntent) ? workflowState.semanticIntent.creationIntent : {});
-    // Preserve explicit concrete path targets when provided; synthesis should
-    // only fill missing create-script aliases, not override intentful paths.
-    for (const key of ["scriptPath", "scriptRef", "filePath", "fileRef", "artifactRef", "path"]) {
-      const raw = safeString(out?.[key]).trim();
-      if (!raw || isLikelyMarkerToken(raw)) continue;
-      if (!this._looksConcreteArtifactPath(raw)) continue;
-      const normalized = normalizeProjectRelativePath(raw);
-      if (normalized) return normalized;
-    }
-    const requestedName =
-      safeString(out.requestedName).trim() ||
-      safeString(out.requested_name).trim() ||
-      safeString(out.name).trim() ||
-      safeString(out.scriptName).trim() ||
-      safeString(out.fileName).trim() ||
-      safeString(nested.requestedName).trim() ||
-      safeString(nested.requested_name).trim() ||
-      safeString(nested.name).trim() ||
-      safeString(semanticCreation.requestedName).trim() ||
-      safeString(semanticCreation.requested_name).trim() ||
-      safeString(semanticCreation.name).trim() ||
-      "";
-    if (!requestedName) return null;
-    const explicitRootFolder = [".", "./", "/"].includes(safeString(out.targetFolder || nested.targetFolder).trim());
-    const folderRaw =
-      safeString(out.targetFolder).trim() ||
-      safeString(out.target_folder).trim() ||
-      safeString(out.folder).trim() ||
-      safeString(out.directory).trim() ||
-      safeString(nested.targetFolder).trim() ||
-      safeString(nested.folder).trim() ||
-      safeString(semanticCreation.targetFolder).trim() ||
-      safeString(semanticCreation.folder).trim() ||
-      "";
-    const normalizedFolder = normalizeProjectRelativePath(folderRaw);
-    const folder = explicitRootFolder
-      ? ""
-      : ((safeString(normalizedFolder).replace(/^\.\/+/, "").replace(/\/+$/, "") || "scripts"));
-    const resourceKind =
-      safeString(out.resourceKind || out.resource_kind || nested.resourceKind || semanticCreation.resourceKind).trim().toLowerCase() ||
-      "";
-    const toolLower = safeString(toolName).toLowerCase();
-    const scriptLike =
-      resourceKind === "script" ||
-      /\.gd$/i.test(requestedName) ||
-      /(^|[_\-\s])script([_\-\s]|$)/.test(toolLower);
-    if (!scriptLike) return null;
-    const stem = sanitizeFileStem(requestedName);
-    if (!stem) return null;
-    return folder ? `${folder}/${stem}.gd` : `${stem}.gd`;
-  }
-
-  async resolveFileRefs({ toolName, args, classification, synthesizedKeys = new Set(), sessionInjectedKeys = [], workflowState = null } = {}) {
+  async resolveFileRefs({ toolName, args, classification, sessionInjectedKeys = [], workflowState = null } = {}) {
     const out = { ...(isPlainObject(args) ? args : {}) };
     const missingArgs = [];
     const notFoundRefs = [];
@@ -603,8 +439,8 @@ export class ArgumentResolver {
     // console.log("[ArgumentResolver] anoher one ",{ args:out});
 
     const opMode = safeString(workflowState?.artifactOperation?.mode).trim().toLowerCase();
-    const createLikeStep = this._isCreateLikeArtifactStep({ toolName, args: out, classification, workflowState });
-    const requiresExistingTarget = !createLikeStep && (opMode === "modify_existing" || opMode === "modify_then_attach" || opMode === "attach_existing");
+    const createOutputMode = this._isCreateOutputMode(workflowState);
+    const requiresExistingTarget = opMode === "modify_existing" || opMode === "modify_then_attach" || opMode === "attach_existing";
     const isAttachMode = opMode === "attach_existing" || opMode === "create_then_attach" || opMode === "modify_then_attach";
     const typedAttachRefs = ["scriptRef", "fileRef", "resourceRef", "artifactRef"];
     const mergedKeys = [...keys];
@@ -638,20 +474,20 @@ export class ArgumentResolver {
       // Policy layer: existing refs (must_exist) resolve via index; create/new path
       // targets (may_not_exist_yet) pass through without not_found checks.
       const policy = defaultPathPolicyForArg(key, out, {
-        synthesized: synthesizedKeys.has(key),
+        synthesized: false,
         sessionInjected: sessionInjectedSet.has(key),
       });
       const isPathLikeRef = this._isFileResourceRefKey(normalizedKey);
-      if (isPathLikeRef && role === "creation_intent_derived") {
-        policy.existencePolicy = "may_not_exist_yet";
-        if (!safeString(policy.provenance).trim()) {
-          policy.provenance = "creation_intent_derived";
-        }
-      } else if (isPathLikeRef && role === "semantic_ref") {
-        if (createLikeStep && isArtifactTargetRef) {
+      if (isPathLikeRef && role === "semantic_ref") {
+        if (requiresExistingTarget) {
+          policy.existencePolicy = "must_exist";
+          if (!safeString(policy.provenance).trim()) {
+            policy.provenance = "resolved_existing_ref";
+          }
+        } else if ((createOutputMode && isArtifactTargetRef) || isExplicitOutputPathArg(key)) {
           policy.existencePolicy = "may_not_exist_yet";
           if (!safeString(policy.provenance).trim()) {
-            policy.provenance = "creation_intent_derived";
+            policy.provenance = "output_target_ref";
           }
         } else {
           policy.existencePolicy = "must_exist";
@@ -718,12 +554,6 @@ export class ArgumentResolver {
         if (enforceResolution) missingArgs.push(key);
         else delete out[key];
       }
-    }
-    for (const key of synthesizedKeys) {
-      argMeta[key] = {
-        provenance: "synthesized_new_path",
-        existencePolicy: "may_not_exist_yet",
-      };
     }
     if (isAttachMode) this._alignAttachScriptResourceProperty(out);
     return { args: out, missingArgs, notFoundRefs, ambiguities, argMeta };
@@ -1023,54 +853,9 @@ export class ArgumentResolver {
     );
   }
 
-  _hasCreationIntentSignals(args = {}, workflowState = null) {
-    const a = isPlainObject(args) ? args : {};
-    const nested = isPlainObject(a.creationIntent) ? a.creationIntent : {};
-    const semanticStateCreation = isPlainObject(workflowState?.semanticState?.creationIntent)
-      ? workflowState.semanticState.creationIntent
-      : {};
-    const semanticIntentCreation = isPlainObject(workflowState?.semanticIntent?.creationIntent)
-      ? workflowState.semanticIntent.creationIntent
-      : {};
-    const goalText = safeString(workflowState?.semanticIntent?.goalText).trim();
-    const hasRequestedName = Boolean(
-      safeString(a.requestedName).trim() ||
-      safeString(nested.requestedName).trim() ||
-      safeString(semanticStateCreation.requestedName).trim() ||
-      safeString(semanticIntentCreation.requestedName).trim()
-    );
-    const hasTargetFolder = Boolean(
-      safeString(a.targetFolder).trim() ||
-      safeString(nested.targetFolder).trim() ||
-      safeString(semanticStateCreation.targetFolder).trim() ||
-      safeString(semanticIntentCreation.targetFolder).trim()
-    );
-    const hasCreateFlag =
-      a.create === true ||
-      a.isCreate === true ||
-      a.isNew === true ||
-      nested.create === true ||
-      nested.isCreate === true ||
-      nested.isNew === true ||
-      semanticStateCreation.create === true ||
-      semanticStateCreation.isCreate === true ||
-      semanticStateCreation.isNew === true ||
-      semanticIntentCreation.create === true ||
-      semanticIntentCreation.isCreate === true ||
-      semanticIntentCreation.isNew === true;
-    return hasRequestedName || hasTargetFolder || hasCreateFlag || /\b(create|new|generate|scaffold)\b/i.test(goalText);
-  }
-
-  _isCreateLikeArtifactStep({ toolName = "", args = {}, classification = null, workflowState = null } = {}) {
+  _isCreateOutputMode(workflowState = null) {
     const opMode = safeString(workflowState?.artifactOperation?.mode).trim().toLowerCase();
-    if (opMode.startsWith("create_")) return true;
-    const rolesByArg = isPlainObject(classification?.rolesByArg) ? classification.rolesByArg : {};
-    for (const meta of Object.values(rolesByArg)) {
-      if (safeString(meta?.role).trim().toLowerCase() === "creation_intent_derived") return true;
-    }
-    const normalizedToolName = safeString(toolName).replace(/[_-]+/g, " ").toLowerCase();
-    if (/\b(create|new|generate|scaffold|init)\b/.test(normalizedToolName)) return true;
-    return this._hasCreationIntentSignals(args, workflowState);
+    return opMode === "create_new" || opMode === "create_then_attach" || opMode === "create_then_modify";
   }
 
   _extractResolvedScenePath(args, workflowState = null) {
@@ -1371,13 +1156,7 @@ export class ArgumentResolver {
   _compileOneAttempt({ toolName, args, argMeta = null, inventory = null, workflowState = null } = {}) {
     const inArgs = isPlainObject(args) ? { ...args } : {};
     const inMeta = isPlainObject(argMeta) ? { ...argMeta } : {};
-    const sink = mapGeneratedContentIntoInlineSink({
-      toolName,
-      args: inArgs,
-      inventory,
-      workflowState,
-    });
-    const argsWithSink = isPlainObject(sink?.args) ? sink.args : inArgs;
+    const argsWithSink = inArgs;
     const normalizedModifyArgs = this._normalizeStructuredModifyPayloadForContract({
       toolName,
       args: argsWithSink,
@@ -1395,22 +1174,15 @@ export class ArgumentResolver {
     if (this._debug) {
       console.log("[VERIFY][content-sink-selection]", {
         tool: safeString(toolName).trim() || null,
-        selectedContentField: safeString(sink?.selectedContentField).trim() || null,
-        availableContentFields: Array.isArray(sink?.availableContentFields) ? sink.availableContentFields : [],
-        mapped: Boolean(sink?.mapped),
+        selectedContentField: null,
+        availableContentFields: [],
+        mapped: false,
         args: normalizedModifyArgs,
       });
     }
-    const readiness = ensureRichPayloadReadiness({
-      toolName,
-      args: tscnCompiledArgs,
-      inventory,
-      workflowState,
-      semanticIntent: workflowState?.semanticIntent,
-    });
     const contractValidatedArgs = this._normalizeStructuredModifyPayloadForContract({
       toolName,
-      args: isPlainObject(readiness?.args) ? readiness.args : tscnCompiledArgs,
+      args: tscnCompiledArgs,
       inventory,
     });
     const modificationTypeValidation = this._validateRequestedModificationTypesAgainstContract({
@@ -1426,48 +1198,6 @@ export class ArgumentResolver {
         reason: modificationTypeValidation.reason || "Requested modification type is not supported by the live MCP contract.",
       };
     }
-    if (safeString(readiness?.status).trim() === "not_ready") {
-      const field = safeString(readiness?.missingSemanticField).trim();
-      const targetedEdits =
-        (Array.isArray(argsWithSink?.targetedEdits) && argsWithSink.targetedEdits) ||
-        (Array.isArray(workflowState?.semanticState?.targetedEdits) && workflowState.semanticState.targetedEdits) ||
-        (Array.isArray(workflowState?.semanticIntent?.targetedEdits) && workflowState.semanticIntent.targetedEdits) ||
-        null;
-      const hasKnownTypedTarget = Boolean(
-        safeString(argsWithSink?.scriptRef).trim() ||
-        safeString(argsWithSink?.fileRef).trim() ||
-        safeString(argsWithSink?.resourceRef).trim() ||
-        safeString(argsWithSink?.artifactRef).trim()
-      );
-      const hasResolvedTarget = this._hasResolvedArtifactTarget({
-        args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
-        argMeta: inMeta,
-      });
-      if (Array.isArray(targetedEdits) && targetedEdits.length > 0 && hasKnownTypedTarget && hasResolvedTarget) {
-        return {
-          status: "uncompilable",
-          args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
-          argMeta: inMeta,
-          reason: readiness?.reason || "Uncompilable structured edit payload for targeted modify-existing intent.",
-        };
-      }
-      if (field) {
-        return {
-          status: "missing_args",
-          args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
-          argMeta: inMeta,
-          missingArgs: [field],
-          reason: readiness?.reason || null,
-        };
-      }
-      return {
-        status: "uncompilable",
-        args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
-        argMeta: inMeta,
-        reason: readiness?.reason || "Structured payload is not executable.",
-      };
-    }
-
     const modifyGate = this._ensureModifyExistingTargetResolution({
       toolName,
       args: contractValidatedArgs,
@@ -1490,7 +1220,7 @@ export class ArgumentResolver {
       if (modifyGate.status === "missing_args") {
         return {
           status: "missing_args",
-          args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
+          args: argsWithSink,
           argMeta: inMeta,
           missingArgs: [modifyGate.field || "artifactRef"],
           reason: modifyGate.reason || null,
@@ -1499,7 +1229,7 @@ export class ArgumentResolver {
       if (modifyGate.status === "ambiguous") {
         return {
           status: "ambiguous",
-          args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
+          args: argsWithSink,
           argMeta: inMeta,
           ambiguities: Array.isArray(modifyGate.ambiguities) ? modifyGate.ambiguities : [],
           reason: modifyGate.reason || null,
@@ -1507,7 +1237,7 @@ export class ArgumentResolver {
       }
       return {
         status: "not_found",
-        args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
+        args: argsWithSink,
         argMeta: inMeta,
         reason: modifyGate.reason || null,
       };
@@ -1522,7 +1252,7 @@ export class ArgumentResolver {
       if (attachGate.status === "missing_args") {
         return {
           status: "missing_args",
-          args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
+          args: argsWithSink,
           argMeta: inMeta,
           missingArgs: [attachGate.field || "artifactRef"],
           reason: attachGate.reason || null,
@@ -1531,7 +1261,7 @@ export class ArgumentResolver {
       if (attachGate.status === "ambiguous") {
         return {
           status: "ambiguous",
-          args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
+          args: argsWithSink,
           argMeta: inMeta,
           ambiguities: Array.isArray(attachGate.ambiguities) ? attachGate.ambiguities : [],
           reason: attachGate.reason || null,
@@ -1539,7 +1269,7 @@ export class ArgumentResolver {
       }
       return {
         status: "not_found",
-        args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
+        args: argsWithSink,
         argMeta: inMeta,
         reason: attachGate.reason || null,
       };
@@ -1553,7 +1283,7 @@ export class ArgumentResolver {
     if (!semanticNodeGate.ok) {
       return {
         status: safeString(semanticNodeGate.status).trim() || "not_found",
-        args: isPlainObject(readiness?.args) ? readiness.args : argsWithSink,
+        args: argsWithSink,
         argMeta: inMeta,
         missingArgs: semanticNodeGate.status === "missing_args" ? [semanticNodeGate.field || "targetNodeRef"] : [],
         reason: semanticNodeGate.reason || null,
@@ -1659,7 +1389,7 @@ export class ArgumentResolver {
       const looksPathLike = this._isFileResourceRefKey(nk);
       const looksSemanticArtifactRef = semanticSlot.endsWith("ref") && semanticSlot !== "projectpath" && !slotLooksNodeRef;
       const hasResolverPathPolicy = isPlainObject(m?.[key]);
-      const roleSuggestsResourcePath = role === "semantic_ref" || role === "creation_intent_derived";
+      const roleSuggestsResourcePath = role === "semantic_ref";
       if (!looksPathLike && !looksSemanticArtifactRef && !hasResolverPathPolicy && !roleSuggestsResourcePath) {
         continue;
       }
@@ -1702,25 +1432,38 @@ export class ArgumentResolver {
   }
 
   _looksLikeNodeMutationStep({ toolName = "", args = {}, inventory = null } = {}) {
-    const t = safeString(toolName).trim().toLowerCase();
     const a = isPlainObject(args) ? args : {};
-    const hasScene = Boolean(safeString(a.scenePath).trim() || safeString(a.sceneRef).trim());
-    const hasNode = Boolean(
-      safeString(a.nodeRef).trim() ||
-      safeString(a.targetNodeRef).trim() ||
-      safeString(a.nodePath).trim() ||
-      safeString(a.targetNodePath).trim() ||
-      safeString(a.parentPath).trim()
-    );
-    if (/\b(add|remove|delete|duplicate|reparent|set)\b/.test(t) && (hasScene || hasNode)) return true;
     const schema = this._getToolSchema(toolName, inventory);
+    const roleInfo = classifyToolArgs({ toolName, inputSchema: schema, args: a });
+    const roleMetas = Object.values(isPlainObject(roleInfo?.rolesByArg) ? roleInfo.rolesByArg : {});
+    const hasNodeSemanticRole = roleMetas.some((meta) => {
+      const semanticSlot = safeString(meta?.semanticSlot).trim().toLowerCase();
+      return semanticSlot.includes("node");
+    });
+    const hasDirectNodeKey = [
+      "nodeRef",
+      "targetNodeRef",
+      "nodePath",
+      "targetNodePath",
+      "parentPath",
+      "parentNodePath",
+    ].some((k) => safeString(a[k]).trim().length > 0);
+    const hasScene = Boolean(safeString(a.scenePath).trim() || safeString(a.sceneRef).trim());
     const keys = [
       ...(Array.isArray(schema?.required) ? schema.required : []),
       ...(isPlainObject(schema?.properties) ? Object.keys(schema.properties) : []),
     ].map((k) => normalizeKey(k));
     const schemaHasSceneNode = keys.some((k) => k.includes("scene")) && keys.some((k) => k.includes("node"));
-    const schemaHasMutationLike = keys.some((k) => k.includes("property") || k.includes("parent") || k.includes("node"));
-    return schemaHasSceneNode && schemaHasMutationLike;
+    const schemaHasMutationLike = keys.some((k) =>
+      k.includes("property") ||
+      k.includes("parent") ||
+      k.includes("node") ||
+      k.includes("remove") ||
+      k.includes("delete") ||
+      k.includes("duplicate") ||
+      k.includes("reparent")
+    );
+    return (hasNodeSemanticRole || hasDirectNodeKey || schemaHasSceneNode) && (schemaHasMutationLike || hasScene);
   }
 
   _ensureSemanticNodeTargetApplied({ toolName = "", args = {}, inventory = null, workflowState = null } = {}) {
@@ -2023,205 +1766,11 @@ export class ArgumentResolver {
     } else {
       out[preferred] = chosenObjectPayload ?? payloadText;
     }
-    if (isPlainObject(out[preferred])) {
-      out[preferred] = this._applyGodotSchemaTypedPropertyPayload({
-        properties: out[preferred],
-        args: out,
-      });
-    } else if (typeof out[preferred] === "string") {
-      const text = safeString(out[preferred]).trim();
-      if (text) {
-        try {
-          const parsed = JSON.parse(text);
-          if (isPlainObject(parsed)) {
-            const typed = this._applyGodotSchemaTypedPropertyPayload({
-              properties: parsed,
-              args: out,
-            });
-            out[preferred] = JSON.stringify(typed);
-          }
-        } catch {
-          // keep raw string payload
-        }
-      }
-    }
-
     for (const key of keys) {
       if (key === preferred) continue;
       if (requiredSet.has(key)) continue;
       if (!Object.prototype.hasOwnProperty.call(out, key)) continue;
       delete out[key];
-    }
-    return out;
-  }
-
-  _ensureGodotSchemaLoaded() {
-    if (this._godotSchemaLoaded) return;
-    this._godotSchemaLoaded = true;
-    try {
-      const here = path.dirname(fileURLToPath(import.meta.url));
-      const schemaPath = path.join(here, "config", "godot_master_schema.json");
-      if (!fs.existsSync(schemaPath)) return;
-      const raw = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
-      if (!isPlainObject(raw)) return;
-      const classMap = new Map();
-      const fallbackMap = new Map();
-      for (const [className, items] of Object.entries(raw)) {
-        if (!Array.isArray(items)) continue;
-        const propMap = new Map();
-        for (const item of items) {
-          if (!isPlainObject(item)) continue;
-          const name = safeString(item.name).trim();
-          const typeId = Number(item.type);
-          if (!name || !Number.isFinite(typeId)) continue;
-          const key = name.toLowerCase();
-          propMap.set(key, {
-            name,
-            type: typeId,
-            hint: safeString(item.hint).trim() || null,
-          });
-          const typeSet = fallbackMap.get(key) || new Set();
-          typeSet.add(typeId);
-          fallbackMap.set(key, typeSet);
-        }
-        if (propMap.size > 0) classMap.set(safeString(className).trim(), propMap);
-      }
-      this._godotSchemaIndex = classMap;
-      this._godotPropertyTypeFallback = fallbackMap;
-    } catch {
-      this._godotSchemaIndex = null;
-      this._godotPropertyTypeFallback = null;
-    }
-  }
-
-  _lookupGodotPropertySpec({ nodeType = "", propertyName = "" } = {}) {
-    this._ensureGodotSchemaLoaded();
-    const prop = safeString(propertyName).trim().toLowerCase();
-    if (!prop) return null;
-    const cls = safeString(nodeType).trim();
-    if (cls && this._godotSchemaIndex instanceof Map) {
-      const byClass = this._godotSchemaIndex.get(cls);
-      if (byClass instanceof Map && byClass.has(prop)) return byClass.get(prop);
-    }
-    if (this._godotPropertyTypeFallback instanceof Map) {
-      const types = this._godotPropertyTypeFallback.get(prop);
-      if (types instanceof Set && types.size === 1) {
-        const only = [...types][0];
-        return { name: propertyName, type: only, hint: null };
-      }
-    }
-    return null;
-  }
-
-  _parseVectorLiteral(value, dim = 2) {
-    const text = safeString(value).trim();
-    const m = text.match(/^Vector([2-4])\s*\(([^)]*)\)$/i);
-    if (!m) return null;
-    const foundDim = Number(m[1]);
-    if (foundDim !== dim) return null;
-    const nums = safeString(m[2]).split(",").map((x) => Number(safeString(x).trim()));
-    if (nums.length !== dim || nums.some((n) => !Number.isFinite(n))) return null;
-    const keys = ["x", "y", "z", "w"].slice(0, dim);
-    const out = {};
-    for (let i = 0; i < keys.length; i += 1) out[keys[i]] = nums[i];
-    return out;
-  }
-
-  _coerceValueForGodotVariantType(typeId, value) {
-    const toNum = (v) => {
-      if (typeof v === "number" && Number.isFinite(v)) return v;
-      const n = Number(safeString(v).trim());
-      return Number.isFinite(n) ? n : null;
-    };
-    const toInt = (v) => {
-      const n = toNum(v);
-      return Number.isFinite(n) ? Math.trunc(n) : null;
-    };
-    const ensureVector = (v, dim = 2, integer = false) => {
-      if (isPlainObject(v)) {
-        const keys = ["x", "y", "z", "w"].slice(0, dim);
-        const out = {};
-        for (const key of keys) {
-          const n = integer ? toInt(v[key]) : toNum(v[key]);
-          if (n == null) return null;
-          out[key] = n;
-        }
-        return out;
-      }
-      if (typeof v === "string") {
-        const fromLiteral = this._parseVectorLiteral(v, dim);
-        if (fromLiteral) {
-          if (!integer) return fromLiteral;
-          const out = {};
-          for (const [k, n] of Object.entries(fromLiteral)) out[k] = Math.trunc(n);
-          return out;
-        }
-      }
-      return null;
-    };
-    switch (Number(typeId)) {
-      case 1: {
-        if (typeof value === "boolean") return value;
-        const t = safeString(value).trim().toLowerCase();
-        if (t === "true") return true;
-        if (t === "false") return false;
-        return null;
-      }
-      case 2: return toInt(value);
-      case 3: return toNum(value);
-      case 4: return safeString(value);
-      case 5: return ensureVector(value, 2, false);
-      case 6: return ensureVector(value, 2, true);
-      case 9: return ensureVector(value, 3, false);
-      case 10: return ensureVector(value, 3, true);
-      case 12: return ensureVector(value, 4, false);
-      case 13: return ensureVector(value, 4, true);
-      case 20: {
-        if (isPlainObject(value)) {
-          const out = {};
-          for (const key of ["r", "g", "b", "a"]) {
-            const n = toNum(value[key]);
-            if (n == null) return null;
-            out[key] = n;
-          }
-          return out;
-        }
-        return null;
-      }
-      case 22: // NodePath
-      case 24: // Object/Resource-like
-        return safeString(value).trim() || null;
-      case 27:
-        return isPlainObject(value) ? value : null;
-      case 28:
-        return Array.isArray(value) ? value : null;
-      default:
-        return value;
-    }
-  }
-
-  _applyGodotSchemaTypedPropertyPayload({ properties = {}, args = {} } = {}) {
-    const input = isPlainObject(properties) ? properties : {};
-    const nodeType =
-      safeString(args.nodeType).trim() ||
-      safeString(args.targetNodeType).trim() ||
-      "";
-    const out = {};
-    for (const [key, value] of Object.entries(input)) {
-      const propName = safeString(key).trim();
-      if (!propName) continue;
-      const root = propName.split("/")[0];
-      const spec = this._lookupGodotPropertySpec({ nodeType, propertyName: root });
-      if (!spec || !Number.isFinite(Number(spec.type))) {
-        out[propName] = value;
-        continue;
-      }
-      const coerced = this._coerceValueForGodotVariantType(spec.type, value);
-      const usable = coerced == null ? value : coerced;
-      out[propName] = {
-        type: Number(spec.type),
-        value: usable,
-      };
     }
     return out;
   }
@@ -2410,8 +1959,7 @@ export class ArgumentResolver {
 
   _ensureModifyExistingTargetResolution({ toolName, args, argMeta = null, workflowState = null } = {}) {
     const opMode = safeString(workflowState?.artifactOperation?.mode).trim().toLowerCase();
-    const createLikeStep = this._isCreateLikeArtifactStep({ toolName, args, workflowState });
-    const needsGate = !createLikeStep && (opMode === "modify_existing" || opMode === "modify_then_attach");
+    const needsGate = opMode === "modify_existing" || opMode === "modify_then_attach";
     if (!needsGate) {
       return { ok: true, canProceed: true, resolutionStatus: "not_applicable", typedRefs: {}, typedPaths: {}, resolvedArtifactPath: null };
     }

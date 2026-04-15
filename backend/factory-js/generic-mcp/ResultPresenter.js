@@ -31,7 +31,7 @@ function formatInline(value, maxLen = 220) {
   if (value == null) return "null";
   if (typeof value === "string") return truncate(value, maxLen);
   try {
-    return truncate(JSON.stringify(value), maxLen);
+    return truncate(JSON.parse(value), maxLen);
   } catch {
     return truncate(String(value), maxLen);
   }

@@ -45,10 +45,10 @@ export class LiveModelClient {
     console.error(
       `[generic-mcp][model] backend=${this._backend} model=${this._model} baseUrl=${this._baseUrl}`
     );
-    console.error("[generic-mcp][model][input]", {
-      responseFormat: normalizeResponseFormat(responseFormat),
-      promptPreview: safeString(prompt).slice(0, 4000),
-    });
+    // console.error("[generic-mcp][model][input]", {
+    //   responseFormat: normalizeResponseFormat(responseFormat),
+    //   promptPreview: safeString(prompt).slice(0, 4000),
+    // });
   }
 
   async generate({ prompt, responseFormat = null } = {}) {

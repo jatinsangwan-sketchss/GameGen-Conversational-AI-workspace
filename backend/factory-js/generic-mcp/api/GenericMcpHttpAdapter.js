@@ -121,60 +121,6 @@ export class GenericMcpHttpAdapter {
     );
   }
 
-  async handleResume(payload) {
-    const body = this._validateObjectPayload(payload);
-    const sessionId = this._requireNonEmptyField(body, "sessionId");
-    const input = this._requireNonEmptyField(body, "input");
-    const responseMode = this._resolveResponseMode(body);
-    const session = this._sessionStore.getSession(sessionId);
-    if (!session) {
-      throw new GenericMcpHttpAdapterError("Unknown sessionId for /resume.", {
-        httpStatus: 404,
-        code: "session_not_found",
-      });
-    }
-
-    const pendingNeedsInput = this._sessionStore.getPendingNeedsInput(sessionId);
-    if (!pendingNeedsInput) {
-      throw new GenericMcpHttpAdapterError("No pending needs_input state for this session.", {
-        httpStatus: 409,
-        code: "resume_without_pending_state",
-      });
-    }
-
-    const projectPath = this._resolveProjectPath(body.projectPath || session.projectPath, {
-      sessionProjectPath: session.projectPath,
-    });
-    const runMode = normalizeRunMode(session.runMode);
-    const runner = this._resolveRunnerForMode(runMode);
-    const runResult = await runner.run({
-      userRequest: input,
-      projectRoot: projectPath,
-      mcpConfig: this._mcpConfig,
-      sessionContext: {
-        projectRoot: projectPath,
-        sidecarSessionId: sessionId,
-      },
-      resumeNeedsInput: pendingNeedsInput,
-    });
-
-    const resolvedProjectPath = this._resolveResultProjectPath(runResult, {
-      fallbackProjectPath: projectPath,
-    });
-    this._sessionStore.setRunResult(sessionId, runResult, {
-      projectPath: resolvedProjectPath,
-      runMode,
-    });
-    return this._ok(
-      this._buildRunResponseBody({
-        sessionId,
-        runResult,
-        responseMode,
-        runMode,
-      })
-    );
-  }
-
   handleHealth() {
     const mcp = this._buildReadinessSnapshot();
     const status = !mcp.available
@@ -317,7 +263,7 @@ export class GenericMcpHttpAdapter {
         ...(toolCount != null ? { toolCount } : {}),
       };
     }
-    out.resumeAvailable = out.status === "needs_input" || out.status === "paused";
+    out.resumeAvailable = false;
     return out;
   }
 

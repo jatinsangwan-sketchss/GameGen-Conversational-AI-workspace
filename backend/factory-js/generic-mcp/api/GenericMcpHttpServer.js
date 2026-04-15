@@ -126,7 +126,7 @@ export class GenericMcpHttpServer {
       return;
     }
 
-    if (method === "POST" && (pathname === "/run" || pathname === "/runlocal" || pathname === "/resume")) {
+    if (method === "POST" && (pathname === "/run" || pathname === "/runlocal")) {
       const contentType = req.headers["content-type"] || "";
       if (!isJsonContentType(contentType)) {
         this._sendJson(res, 415, {
@@ -140,12 +140,9 @@ export class GenericMcpHttpServer {
       const rawBody = await readRequestBody(req, { maxBodyBytes: this._maxBodyBytes });
       const body = parseJsonBody(rawBody);
 
-      const result =
-        pathname === "/resume"
-          ? await this._adapter.handleResume(body)
-          : await this._adapter.handleRun(body, {
-              runMode: pathname === "/run" ? "online" : "local",
-            });
+      const result = await this._adapter.handleRun(body, {
+        runMode: pathname === "/run" ? "online" : "local",
+      });
       this._sendJson(res, result.httpStatus, result.body);
       return;
     }
@@ -180,4 +177,3 @@ export class GenericMcpHttpServer {
     res.end(payload);
   }
 }
-

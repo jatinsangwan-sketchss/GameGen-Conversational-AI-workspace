@@ -4,10 +4,6 @@ function safeString(value) {
   return value == null ? "" : String(value);
 }
 
-function isPlainObject(value) {
-  return value != null && typeof value === "object" && !Array.isArray(value);
-}
-
 function clone(value) {
   if (value == null) return value;
   try {
@@ -27,14 +23,6 @@ function normalizeProjectPath(projectPath) {
   return v || null;
 }
 
-function isResumableRunResult(runResult) {
-  const status = safeString(runResult?.status).trim();
-  if (status === "needs_input") return true;
-  if (status !== "paused") return false;
-  const queue = runResult?.taskQueue;
-  return isPlainObject(queue) && safeString(queue.status).trim() === "paused";
-}
-
 function makeRecord({ sessionId, projectPath = null }) {
   const now = new Date().toISOString();
   return {
@@ -44,7 +32,6 @@ function makeRecord({ sessionId, projectPath = null }) {
     createdAt: now,
     updatedAt: now,
     lastRunResult: null,
-    pendingNeedsInput: null,
   };
 }
 
@@ -88,7 +75,6 @@ export class GenericMcpSessionStore {
     if (!next) return null;
 
     next.lastRunResult = clone(runResult);
-    next.pendingNeedsInput = isResumableRunResult(runResult) ? clone(runResult) : null;
     if (projectPath != null) {
       next.projectPath = normalizeProjectPath(projectPath);
     }
@@ -99,23 +85,6 @@ export class GenericMcpSessionStore {
     next.updatedAt = new Date().toISOString();
     this._touch(id, next);
     return clone(next);
-  }
-
-  getPendingNeedsInput(sessionId) {
-    const rec = this.getSession(sessionId);
-    if (!rec) return null;
-    return isPlainObject(rec.pendingNeedsInput) ? clone(rec.pendingNeedsInput) : null;
-  }
-
-  clearPendingNeedsInput(sessionId) {
-    const id = normalizeSessionId(sessionId);
-    if (!id) return null;
-    const rec = this._sessions.get(id);
-    if (!rec) return null;
-    rec.pendingNeedsInput = null;
-    rec.updatedAt = new Date().toISOString();
-    this._touch(id, rec);
-    return clone(rec);
   }
 
   getSummary() {
@@ -139,4 +108,3 @@ export class GenericMcpSessionStore {
     }
   }
 }
-

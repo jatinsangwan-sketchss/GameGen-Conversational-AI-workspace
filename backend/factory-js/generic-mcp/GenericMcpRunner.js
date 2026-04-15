@@ -25,24 +25,25 @@ import { ProjectFileIndex } from "./ProjectFileIndex.js";
 import { ResourceResolver } from "./ResourceResolver.js";
 import { NodeResolver } from "./NodeResolver.js";
 import { ArtifactRegistry } from "./ArtifactRegistry.js";
-import { buildRuntimeState, extractSemanticArgs, toSemanticField } from "./RuntimeStateModel.js";
-import { interpretGoalIntent, synthesizeCodeArtifact } from "./GoalIntentInterpreter.js";
 import {
+  buildRuntimeState,
+  extractSemanticArgs,
+  toSemanticField,
+  interpretGoalIntent,
+  synthesizeCodeArtifact,
   buildArtifactOperationState,
   checkOperationDrift,
   updateObservedEffects,
-} from "./ArtifactOperationModel.js";
-import { compactStepVerification, verifyWorkflowPostconditions } from "./PostconditionVerifier.js";
-import { ensureGeneratedContentForStep } from "./ContentGenerationStage.js";
-import { TextEditFallbackStage } from "./TextEditFallbackStage.js";
-import {
+  compactStepVerification,
+  verifyWorkflowPostconditions,
   buildSemanticWorkflowState,
   seedArgsFromSemanticState,
   updateSemanticStateFromStep,
   refreshPendingSemanticGaps,
   hasSemanticFieldValue,
   firstPendingSemanticGap,
-} from "./SemanticWorkflowState.js";
+} from "./WorkflowCore.js";
+import { TextEditFallbackStage } from "./TextEditFallbackStage.js";
 
 function safeString(value) {
   return value == null ? "" : String(value);
@@ -208,7 +209,7 @@ export class GenericMcpRunner {
     pageSize = 100,
     maxSteps = 6,
     maxQueuedTasks = 12,
-    allowContentFallback = true,
+    disableContentSynthesis = null,
     hooks = null,
     debug = false,
   } = {}) {
@@ -229,7 +230,13 @@ export class GenericMcpRunner {
     this._maxQueuedTasks = Number.isFinite(Number(maxQueuedTasks))
       ? Math.max(1, Math.min(50, Math.floor(Number(maxQueuedTasks))))
       : 12;
-    this._allowContentFallback = Boolean(allowContentFallback);
+    const envDisableContentSynthesis = safeString(process.env.GENERIC_MCP_DISABLE_CONTENT_SYNTHESIS).trim().toLowerCase();
+    this._disableContentSynthesis =
+      typeof disableContentSynthesis === "boolean"
+        ? disableContentSynthesis
+        : envDisableContentSynthesis
+          ? envDisableContentSynthesis !== "false"
+          : true;
     this._debug =
       Boolean(debug) ||
       safeString(process.env.DEBUG_GENERIC_MCP_VERIFY).trim().toLowerCase() === "true";
@@ -280,7 +287,7 @@ export class GenericMcpRunner {
     if (!request) {
       return this._buildRunResult({
         ok: false,
-        status: "needs_input",
+        status: "failed",
         reason: "userRequest is required.",
         presentation: "Unsupported request: userRequest is required.",
       });
@@ -328,7 +335,7 @@ export class GenericMcpRunner {
     if (!request) {
       return this._buildRunResult({
         ok: false,
-        status: "needs_input",
+        status: "failed",
         reason: "userRequest is required.",
         presentation: "Unsupported request: userRequest is required.",
       });
@@ -451,27 +458,6 @@ export class GenericMcpRunner {
       // });
       const contentInvariant = await this._ensureContentGenerationInvariant({ workflowState });
       if (!contentInvariant.ok) {
-        if (safeString(contentInvariant.kind).trim() === "needs_input") {
-          return this._buildNeedsInputResult({
-            sessionStatus,
-            inventory,
-            planningResult: {
-              status: "missing_args",
-              tools: [],
-              missingArgs: [contentInvariant.field || "contentIntent"],
-              ambiguities: [],
-              reason: safeString(contentInvariant.reason).trim() || null,
-            },
-            resolvedPlan: {
-              status: "missing_args",
-              tools: [],
-              missingArgs: [contentInvariant.field || "contentIntent"],
-              ambiguities: [],
-              reason: safeString(contentInvariant.reason).trim() || null,
-            },
-            workflowState,
-          });
-        }
         return this._buildRunResult({
           ok: false,
           status: "failed",
@@ -707,9 +693,12 @@ export class GenericMcpRunner {
             }),
           });
         }
-        return this._buildNeedsInputResult({
+        return this._buildRunResult({
+          ok: false,
+          status: "failed",
+          reason: safeString(planning?.reason).trim() || decisionStatus || "planner_not_executable",
           sessionStatus,
-          inventory,
+          inventorySummary: { toolCount: inventory.toolCount, fetchedAt: inventory.fetchedAt },
           planningResult: planning,
           resolvedPlan: {
             status: decisionStatus === "needs_input" ? "missing_args" : decisionStatus,
@@ -718,7 +707,21 @@ export class GenericMcpRunner {
             ambiguities: Array.isArray(planning?.ambiguities) ? planning.ambiguities : [],
             reason: safeString(planning?.reason).trim() || null,
           },
+          executionResult: { ok: false, results: allStepResults, error: "planner_not_executable" },
+          presentation: `Failed: ${safeString(planning?.reason).trim() || decisionStatus || "planner could not produce executable step"}`,
           workflowState,
+          runtimeState: this._runtimeWithWorkflow({
+            planningResult: planning,
+            resolvedPlan: {
+              status: decisionStatus === "needs_input" ? "missing_args" : decisionStatus,
+              tools: Array.isArray(planning?.tools) ? planning.tools : [],
+              missingArgs: Array.isArray(planning?.missingArgs) ? planning.missingArgs : [],
+              ambiguities: Array.isArray(planning?.ambiguities) ? planning.ambiguities : [],
+              reason: safeString(planning?.reason).trim() || null,
+            },
+            inventory,
+            workflowState,
+          }),
         });
       }
 
@@ -805,12 +808,23 @@ export class GenericMcpRunner {
             }),
           });
         }
-        return this._buildNeedsInputResult({
+        return this._buildRunResult({
+          ok: false,
+          status: "failed",
+          reason: safeString(resolvedPlan?.reason).trim() || safeString(resolvedPlan?.status).trim() || "resolver_not_ready",
           sessionStatus,
-          inventory,
+          inventorySummary: { toolCount: inventory.toolCount, fetchedAt: inventory.fetchedAt },
           planningResult: contentSeededPlanForResolver,
           resolvedPlan,
+          executionResult: { ok: false, results: allStepResults, error: "resolver_not_ready" },
+          presentation: `Failed: ${safeString(resolvedPlan?.reason).trim() || "resolver could not produce executable args"}`,
           workflowState,
+          runtimeState: this._runtimeWithWorkflow({
+            planningResult: contentSeededPlanForResolver,
+            resolvedPlan,
+            inventory,
+            workflowState,
+          }),
         });
       }
       await this._ensureGeneratedContentStage({
@@ -881,7 +895,7 @@ export class GenericMcpRunner {
       if (!drift.ok) {
         return this._buildRunResult({
           ok: false,
-          status: "needs_input",
+          status: "failed",
           reason: drift.reason,
           sessionStatus,
           inventorySummary: { toolCount: inventory.toolCount, fetchedAt: inventory.fetchedAt },
@@ -889,28 +903,7 @@ export class GenericMcpRunner {
           resolvedPlan: gatedReadyPlan,
           executionResult: null,
           presentation: drift.reason,
-          needsInput: {
-            status: "needs_input",
-            kind: "missing_args",
-            tool: safeString(gatedReadyPlan.tools?.[0]?.name).trim() || null,
-            question: "Should I create a new artifact or modify the existing one?",
-            missing: ["artifactOperationChoice"],
-            field: "artifactOperationChoice",
-            options: [],
-            attemptedValue: null,
-            partialPlan: {
-              tool: safeString(gatedReadyPlan.tools?.[0]?.name).trim() || null,
-              args: extractSemanticArgs({
-                toolName: safeString(gatedReadyPlan.tools?.[0]?.name).trim(),
-                args: gatedReadyPlan.tools?.[0]?.args,
-                inventory,
-              }),
-            },
-            raw: {
-              plannerStatus: safeString(planning?.status).trim() || null,
-              resolverStatus: safeString(gatedReadyPlan?.status).trim() || null,
-            },
-          },
+          needsInput: null,
           workflowState,
           runtimeState: this._runtimeWithWorkflow({
             planningResult: contentSeededPlanForResolver,
@@ -1349,9 +1342,9 @@ export class GenericMcpRunner {
     let currentTaskIndex = Number.isFinite(Number(q.currentTaskIndex))
       ? Math.max(0, Math.min(tasks.length - 1, Math.floor(Number(q.currentTaskIndex))))
       : 0;
-    let pausedTask = isPlainObject(q.pausedTask) ? q.pausedTask : null;
-    let pauseReason = safeString(q.pauseReason).trim().toLowerCase() === "needs_input" ? "needs_input" : "failed";
-    const isResume = Boolean(queueResumeState?.isQueueExecution);
+    let pausedTask = null;
+    let pauseReason = null;
+    const isResume = false;
 
     for (let taskIndex = currentTaskIndex; taskIndex < tasks.length; taskIndex += 1) {
       const originalTaskText = tasks[taskIndex];
@@ -1410,38 +1403,27 @@ export class GenericMcpRunner {
         continue;
       }
 
-      const queuePauseReason = status === "needs_input" ? "needs_input" : "failed";
       const remainingTasks = tasks.slice(taskIndex + 1);
-      const queuePresentation =
-        queuePauseReason === "needs_input"
-          ? safeString(taskResult?.question).trim() ||
-            `Task ${taskIndex + 1} needs more input before queue execution can continue.`
-          : `Task ${taskIndex + 1} failed and queue execution is paused. Reply with \"retry\" to retry this task, \"skip\" to skip it, or provide replacement task text.`;
-          
       return {
         ok: false,
-        status: "paused",
-        reason: queuePauseReason === "needs_input" ? "queue_paused_needs_input" : "queue_paused_failed",
+        status: "failed",
+        reason: "queue_task_failed",
         session: taskResult?.session ?? null,
         inventory: taskResult?.inventory ?? null,
         planning: taskResult?.planning ?? null,
         resolved: taskResult?.resolved ?? null,
         execution: taskResult?.execution ?? null,
-        presentation: queuePresentation,
+        presentation: `Task ${taskIndex + 1} failed; queue stopped.`,
         runtime: taskResult?.runtime ?? null,
         workflow: taskResult?.workflow ?? null,
-        pauseReason: queuePauseReason,
-        question: queuePauseReason === "needs_input"
-          ? queuePresentation
-          : "What should I do with the paused task?",
-        options: queuePauseReason === "needs_input"
-          ? []
-          : ["retry", "skip", "replace_task_text"],
+        pauseReason: null,
+        question: null,
+        options: [],
         pausedTaskStatus: status || null,
         pausedTaskResult: taskResult,
         taskQueue: {
           mode: "sequential",
-          status: "paused",
+          status: "failed",
           originalRequest: safeString(q.originalRequest).trim() || null,
           totalTasks: tasks.length,
           currentTaskIndex: taskIndex,
@@ -1449,12 +1431,8 @@ export class GenericMcpRunner {
           tasks,
           pendingTasks: tasks.slice(taskIndex),
           remainingTasks,
-          pauseReason: queuePauseReason,
-          pausedTask: {
-            index: taskIndex,
-            task: originalTaskText,
-            result: taskResult,
-          },
+          pauseReason: null,
+          pausedTask: null,
         },
       };
     }
@@ -2187,9 +2165,10 @@ export class GenericMcpRunner {
     const stepTool = safeString(step?.name).trim().toLowerCase();
     const stepOk = Boolean(executionResult?.ok);
     if (!stepOk) return;
-    const looksSetter = /set|update|modify|edit|patch|change/.test(stepTool);
-    if (!looksSetter) return;
     const { nodeValue, nodeLeaf, propertyKeys } = this._extractPropertyMutationContext(step?.args);
+    const hasPropertyMutationPayload = propertyKeys.size > 0;
+    const looksSetter = hasPropertyMutationPayload || /set|update|modify|edit|patch|change/.test(stepTool);
+    if (!looksSetter) return;
     if (!nodeValue || propertyKeys.size < 1) return;
     const normalizedNode = safeString(nodeValue).trim().toLowerCase();
     const normalizedLeaf = safeString(nodeLeaf).trim().toLowerCase();
@@ -2406,6 +2385,9 @@ export class GenericMcpRunner {
   }
 
   async _ensureGeneratedContentStage({ resolvedPlan, workflowState, sessionContext = null }) {
+    if (this._disableContentSynthesis) {
+      return { status: "disabled", reason: "content_synthesis_disabled" };
+    }
     const rp = isPlainObject(resolvedPlan) ? resolvedPlan : {};
     if (safeString(rp.status).trim() !== "ready") return;
     const firstTool = rp?.tools?.[0] ?? null;
@@ -2425,47 +2407,8 @@ export class GenericMcpRunner {
     );
     if (!hasIntent) return;
 
-    const generated = await ensureGeneratedContentForStep({
-      toolName,
-      args,
-      workflowState,
-      modelClient: this._modelClient,
-      allowFallback: this._allowContentFallback,
-      sessionContext,
-    });
-    if (isPlainObject(generated?.generationContext)) {
-      if (!isPlainObject(workflowState.semanticState)) workflowState.semanticState = {};
-      workflowState.semanticState.generationContext = { ...generated.generationContext };
-    }
-    if (safeString(generated?.status).trim() !== "ready" || !isPlainObject(generated?.generatedContent)) return generated;
-    if (!isPlainObject(workflowState.semanticState)) workflowState.semanticState = {};
-    workflowState.semanticState.generatedContent = { ...generated.generatedContent };
-    workflowState.semanticState.generatedCode = safeString(generated.generatedContent.content).trim() || null;
-    workflowState.semanticState.contentApplication = {
-      status: "pending",
-      intent: safeString(generated.generatedContent.intent).trim() || null,
-      contextReadiness: safeString(generated.generatedContent.contextReadiness).trim() || null,
-    };
-    if (!safeString(workflowState.semanticState.contentIntent).trim()) {
-      workflowState.semanticState.contentIntent = safeString(generated.generatedContent.intent).trim() || null;
-    }
-    if (this._debug) {
-      console.log("[VERIFY][post-contentgen-state]", {
-        hasGeneratedContent: Boolean(safeString(workflowState?.semanticState?.generatedContent?.content).trim()),
-        hasGeneratedCode: Boolean(safeString(workflowState?.semanticState?.generatedCode).trim()),
-        hasCompiledPayload:
-          isPlainObject(workflowState?.semanticState?.compiledPayload) &&
-          Object.keys(workflowState.semanticState.compiledPayload).length > 0,
-        generatedContent: workflowState?.semanticState?.generatedContent ?? null,
-        generatedCode: workflowState?.semanticState?.generatedCode ?? null,
-        generatedPreview: safeString(
-          workflowState?.semanticState?.generatedContent?.content ||
-          workflowState?.semanticState?.generatedCode ||
-          ""
-        ).slice(0, 300),
-      });
-    }
-    return generated;
+    void sessionContext;
+    return { status: "disabled", reason: "content_synthesis_disabled" };
   }
 
   _isContentBearingWorkflow(workflowState) {
@@ -2489,6 +2432,7 @@ export class GenericMcpRunner {
   }
 
   async _ensureContentGenerationInvariant({ workflowState }) {
+    if (this._disableContentSynthesis) return { ok: true, reason: null };
     if (!this._isContentBearingWorkflow(workflowState)) return { ok: true, reason: null };
     if (this._hasGeneratedOrCompiledContent(workflowState)) return { ok: true, reason: null };
     const semanticState = isPlainObject(workflowState?.semanticState) ? workflowState.semanticState : {};
