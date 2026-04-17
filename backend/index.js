@@ -82,7 +82,6 @@ app.post("/api/chat", async (req, res) => {
   }
 })
 
-
 /**
  * Clear session endpoint
  * Clears UI specs stored in memory

@@ -1,0 +1,264 @@
+#!/usr/bin/env node
+/**
+ * run-generic-mcp-server
+ * -----------------------------------------------------------------------------
+ * Sidecar entrypoint for the thin Generic MCP runtime.
+ *
+ * Responsibilities:
+ * - load config + model clients
+ * - wire runtime modules
+ * - start HTTP API server
+ * - perform optional startup readiness warmup
+ */
+
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import dotenv from "dotenv";
+
+import { SessionManager } from "./SessionManager.js";
+import { ToolInventory } from "./ToolInventory.js";
+import { ToolPlanner } from "./ToolPlanner.js";
+import { ArgumentResolver } from "./ArgumentResolver.js";
+import { Executor } from "./Executor.js";
+import { ResultPresenter } from "./ResultPresenter.js";
+import { GenericMcpRunner } from "./GenericMcpRunner.js";
+import { LiveModelClient } from "./LiveModelClient.js";
+import { SessionGraphStore } from "./SessionGraphStore.js";
+import { McpConfigLoader } from "./McpConfigLoader.js";
+
+import { GenericMcpSessionStore } from "./api/GenericMcpSessionStore.js";
+import { GenericMcpHttpAdapter } from "./api/GenericMcpHttpAdapter.js";
+import { GenericMcpHttpServer } from "./api/GenericMcpHttpServer.js";
+import { buildGenericMcpServerConfig, genericMcpServerUsage } from "./config/genericMcpServer.config.js";
+
+function safeString(value) {
+  return value == null ? "" : String(value);
+}
+
+function hasArg(argv, name) {
+  return argv.includes(name);
+}
+
+async function loadCreateClient(clientModulePath) {
+  const abs = path.resolve(clientModulePath);
+  const mod = await import(pathToFileURL(abs).href);
+  const fn =
+    (typeof mod.createClient === "function" && mod.createClient) ||
+    (typeof mod.default === "function" && mod.default) ||
+    (typeof mod.default?.createClient === "function" && mod.default.createClient) ||
+    null;
+  if (!fn) {
+    throw new Error(`Client module must export createClient(...): ${abs}`);
+  }
+  return fn;
+}
+
+function isMainModule() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  return import.meta.url === pathToFileURL(path.resolve(entry)).href;
+}
+
+function loadEnvironmentVariables() {
+  // 1) Respect any env already injected by shell/process manager.
+  // 2) Load conventional .env from current working directory, if present.
+  dotenv.config();
+  // 3) Also load backend/.env (relative to this script) for sidecar runs
+  // started outside backend/ where cwd-based dotenv lookup may miss it.
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const backendEnvPath = path.resolve(here, "..", "..", ".env");
+  dotenv.config({ path: backendEnvPath });
+}
+
+export async function createGenericMcpSidecarRuntime({ argv = [], env = process.env } = {}) {
+  loadEnvironmentVariables();
+  const config = buildGenericMcpServerConfig({ argv, env });
+  const configLoader = new McpConfigLoader();
+  const configResult = await configLoader.load({
+    mcpConfigPath: config.mcpConfigPath,
+    mcpConfigJson: config.mcpConfigJson,
+  });
+
+  if (!configResult.ok) {
+    throw new Error(`Failed to load MCP config: ${safeString(configResult.error)}`);
+  }
+
+  const mcpConfig = configResult.mcpConfig;
+  const createClient = await loadCreateClient(config.clientModulePath);
+  const localModelClient = new LiveModelClient(config.model);
+  const onlineModelClient = new LiveModelClient(config.onlineModel);
+
+  const sessionManager = new SessionManager({
+    mcpConfig,
+    createClient: async ({ mcpConfig: cfg }) => createClient({ mcpConfig: cfg }),
+    debug: config.debug,
+  });
+
+  const toolInventory = new ToolInventory({ sessionManager });
+  const sessionGraphStore = new SessionGraphStore({ debug: config.debug });
+  const localToolPlanner = new ToolPlanner({ toolInventory, modelClient: localModelClient });
+  const onlineToolPlanner = new ToolPlanner({ toolInventory, modelClient: onlineModelClient });
+  const argumentResolver = new ArgumentResolver({
+    sessionManager,
+    toolInventory,
+    debug: config.debug,
+  });
+  const executor = new Executor({
+    sessionManager,
+    toolInventory,
+    sessionGraphStore,
+    debug: config.debug,
+  });
+  const resultPresenter = new ResultPresenter({ debug: config.debug });
+
+  const localRunner = new GenericMcpRunner({
+    sessionManager,
+    toolInventory,
+    toolPlanner: localToolPlanner,
+    argumentResolver,
+    executor,
+    resultPresenter,
+    sessionGraphStore,
+    modelClient: localModelClient,
+    mcpConfig,
+    debug: config.debug,
+  });
+  const onlineRunner = new GenericMcpRunner({
+    sessionManager,
+    toolInventory,
+    toolPlanner: onlineToolPlanner,
+    argumentResolver,
+    executor,
+    resultPresenter,
+    sessionGraphStore,
+    modelClient: onlineModelClient,
+    mcpConfig,
+    debug: config.debug,
+  });
+
+  const sessionStore = new GenericMcpSessionStore({ maxSessions: config.maxSessions });
+  const adapter = new GenericMcpHttpAdapter({
+    runner: localRunner,
+    localRunner,
+    onlineRunner,
+    sessionStore,
+    sessionManager,
+    mcpConfig,
+    defaultProjectPath: config.defaultProjectPath,
+    debug: config.debug,
+  });
+  const server = new GenericMcpHttpServer({
+    adapter,
+    host: config.host,
+    port: config.port,
+    maxBodyBytes: config.maxBodyBytes,
+    debug: config.debug,
+  });
+
+  let stopped = false;
+  let startupWarmupPromise = null;
+  async function warmupConnection({ projectRoot = null, source = "startup" } = {}) {
+    const desiredProjectRoot = safeString(projectRoot).trim() || config.defaultProjectPath || null;
+    const label = safeString(source).trim() || "startup";
+    const projectLabel = desiredProjectRoot ? ` project=${desiredProjectRoot}` : "";
+    console.error(`[generic-mcp] ${label} gate: initialize+bridge readiness${projectLabel}`);
+    try {
+      const readyRes = await sessionManager.ensureReady(desiredProjectRoot);
+      const st = sessionManager.getStatus();
+      if (readyRes?.ok) {
+        console.error(
+          `[generic-mcp] ${label} gate: ready (bridgeReady=${Boolean(st?.bridgeReady)} connectedProjectPath=${safeString(st?.connectedProjectPath).trim() || "null"})`
+        );
+        return { ok: true, status: st };
+      }
+      const err = safeString(readyRes?.status?.lastError ?? st?.lastError ?? "bridge not ready").trim() || "bridge not ready";
+      console.error(`[generic-mcp] ${label} gate: not ready (${err})`);
+      return { ok: false, status: st, error: err };
+    } catch (err) {
+      const text = safeString(err?.message ?? err).trim() || "bridge readiness failed";
+      console.error(`[generic-mcp] ${label} gate failed: ${text}`);
+      return { ok: false, status: sessionManager.getStatus(), error: text };
+    }
+  }
+  function startStartupWarmup() {
+    if (!config.autoInitializeOnStart || stopped || startupWarmupPromise) return startupWarmupPromise;
+    startupWarmupPromise = warmupConnection({ source: "startup" }).finally(() => {
+      startupWarmupPromise = null;
+    });
+    return startupWarmupPromise;
+  }
+  return {
+    config,
+    mcpConfig,
+    sessionManager,
+    runner: localRunner,
+    localRunner,
+    onlineRunner,
+    sessionStore,
+    adapter,
+    server,
+    async start() {
+      const address = await server.start();
+      startStartupWarmup();
+      return address;
+    },
+    async warmupConnection(options = {}) {
+      return warmupConnection(options);
+    },
+    async stop() {
+      if (stopped) return;
+      stopped = true;
+      await server.stop();
+      await sessionManager.shutdown();
+    },
+  };
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  if (hasArg(argv, "--help")) {
+    console.log(genericMcpServerUsage());
+    process.exit(0);
+  }
+
+  const runtime = await createGenericMcpSidecarRuntime({ argv, env: process.env });
+  const address = await runtime.start();
+  console.error(
+    `[generic-mcp] sidecar listening on http://${address?.host || "127.0.0.1"}:${address?.port || runtime.config.port}`
+  );
+  console.error(
+    `[generic-mcp] workflow source of truth: GenericMcpRunner | client module: ${runtime.config.clientModulePath}`
+  );
+  console.error(
+    `[generic-mcp] startup auto-init gate: ${runtime.config.autoInitializeOnStart ? "enabled" : "disabled"}`
+  );
+
+  let shuttingDown = false;
+  const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.error(`[generic-mcp] received ${signal}; shutting down sidecar...`);
+    await runtime.stop();
+    process.exit(0);
+  };
+
+  process.once("SIGINT", () => {
+    shutdown("SIGINT").catch((err) => {
+      console.error("[generic-mcp] shutdown error:", safeString(err?.message ?? err));
+      process.exit(1);
+    });
+  });
+  process.once("SIGTERM", () => {
+    shutdown("SIGTERM").catch((err) => {
+      console.error("[generic-mcp] shutdown error:", safeString(err?.message ?? err));
+      process.exit(1);
+    });
+  });
+}
+
+if (isMainModule()) {
+  main().catch((err) => {
+    console.error("run-generic-mcp-server failed:", safeString(err?.message ?? err));
+    process.exit(1);
+  });
+}
