@@ -1,3 +1,12 @@
+/**
+ * PropertyValueCoercer
+ * -----------------------------------------------------------------------------
+ * Converts loosely-typed planner/property payload values into Godot-friendly
+ * structured values when possible (vectors, colors, resources).
+ *
+ * This helper is pure and side-effect free. It does not read files or call MCP.
+ */
+
 function safeString(value) {
   return value == null ? "" : String(value);
 }
@@ -209,4 +218,3 @@ export function coercePropertyLikeArgs({ toolName, args, artifactRegistry = null
 
   return { args: out, changed, coercions };
 }
-

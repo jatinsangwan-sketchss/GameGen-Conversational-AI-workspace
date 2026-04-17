@@ -71,6 +71,39 @@ function normalizePlannerEntry(entry) {
     category: safeString(raw.category).trim() || null,
   };
 }
+
+function compactToolSchemaForPrompt(tool = {}) {
+  const t = isPlainObject(tool) ? tool : {};
+  const name = safeString(t?.name).trim();
+  if (!name) return null;
+  const description = safeString(t?.description).trim() || null;
+  const inputSchema = isPlainObject(t?.inputSchema) ? t.inputSchema : {};
+  const required = Array.isArray(inputSchema?.required)
+    ? inputSchema.required.map((k) => safeString(k).trim()).filter(Boolean)
+    : [];
+  const properties = isPlainObject(inputSchema?.properties) ? inputSchema.properties : {};
+  const compactProps = {};
+  for (const [key, value] of Object.entries(properties)) {
+    if (!isPlainObject(value)) continue;
+    const type = safeString(value.type).trim() || null;
+    const descriptionText = safeString(value.description).trim() || null;
+    const enumVals = Array.isArray(value.enum) ? value.enum.map((x) => safeString(x).trim()).filter(Boolean).slice(0, 30) : undefined;
+    compactProps[key] = {
+      type,
+      description: descriptionText,
+      ...(enumVals ? { enum: enumVals } : {}),
+    };
+  }
+  return {
+    name,
+    description,
+    inputSchema: {
+      type: safeString(inputSchema?.type).trim() || "object",
+      required,
+      properties: compactProps,
+    },
+  };
+}
 function isLikelyJsonParseFailure(error) {
   const text = safeString(error?.message ?? error).toLowerCase();
   if (!text) return false;
@@ -126,6 +159,18 @@ function normalizeAmbiguities(items) {
       return null;
     })
     .filter(Boolean);
+}
+
+function extractUnsupportedMissingArgClaim(reason = "") {
+  const text = safeString(reason).trim();
+  if (!text) return null;
+  const m1 = text.match(/does not support\s+([A-Za-z0-9_]+)/i);
+  if (m1?.[1]) return safeString(m1[1]).trim();
+  const m2 = text.match(/cannot\s+set\s+([A-Za-z0-9_]+)/i);
+  if (m2?.[1]) return safeString(m2[1]).trim();
+  const m3 = text.match(/missing capability.*?([A-Za-z0-9_]+)/i);
+  if (m3?.[1]) return safeString(m3[1]).trim();
+  return null;
 }
 
 function normalizeConfidence(value, fallback = 0.5) {
@@ -333,6 +378,82 @@ function hasSequencingHint(request = "") {
   return /\b(first|before|then|after|next|followed by)\b/.test(text);
 }
 
+function scoreToolForRequest(toolName = "", request = "", schema = {}) {
+  const nameTokens = tokenize(toolName);
+  const reqTokens = tokenize(request);
+  const schemaTokens = [
+    ...(Array.isArray(schema?.required) ? schema.required : []),
+    ...(isPlainObject(schema?.properties) ? Object.keys(schema.properties) : []),
+  ].flatMap((x) => tokenize(x));
+  const reqSet = new Set(reqTokens);
+  let score = 0;
+  for (const t of nameTokens) {
+    if (reqSet.has(t)) score += 4;
+  }
+  for (const t of schemaTokens) {
+    if (reqSet.has(t)) score += 1;
+  }
+  return score;
+}
+
+function extractPathLikeHintFromRequest(request = "") {
+  const text = safeString(request);
+  const byOutput = text.match(/\boutput\s+([A-Za-z0-9_./-]+\.[A-Za-z0-9_]+)/i);
+  if (byOutput?.[1]) return byOutput[1];
+  const anyPath = text.match(/\b(?:res:\/\/)?[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+\b/i);
+  return anyPath?.[0] ?? null;
+}
+
+function extractPresetHintFromRequest(request = "", schema = {}) {
+  const text = safeString(request);
+  const byPreset = text.match(/\bpreset\s+([A-Za-z0-9 _-]{2,40})/i);
+  const raw = safeString(byPreset?.[1]).trim();
+  if (!raw) return null;
+  const cleaned = raw.replace(/[.,;:!?`"'()]+$/g, "").trim();
+  const properties = isPlainObject(schema?.properties) ? schema.properties : {};
+  const presetKey = Object.keys(properties).find((k) => normalizeKeyForMatch(k) === "preset" || normalizeKeyForMatch(k).includes("preset"));
+  const enumVals = Array.isArray(properties?.[presetKey]?.enum) ? properties[presetKey].enum.map((x) => safeString(x).trim()).filter(Boolean) : [];
+  if (enumVals.length < 1) return cleaned;
+  const hit = enumVals.find((v) => v.toLowerCase() === cleaned.toLowerCase()) ??
+    enumVals.find((v) => cleaned.toLowerCase().includes(v.toLowerCase()) || v.toLowerCase().includes(cleaned.toLowerCase())) ??
+    null;
+  return hit || cleaned;
+}
+
+function fillArgsFromRequestBySchema({ request = "", schema = {}, args = {} } = {}) {
+  const inArgs = isPlainObject(args) ? args : {};
+  const out = {};
+  const properties = isPlainObject(schema?.properties) ? schema.properties : {};
+  for (const key of Object.keys(properties)) {
+    if (Object.prototype.hasOwnProperty.call(inArgs, key)) out[key] = inArgs[key];
+  }
+  const pathHint = extractPathLikeHintFromRequest(request);
+  const presetHint = extractPresetHintFromRequest(request, schema);
+  for (const key of Object.keys(properties)) {
+    if (hasRequiredArgValue(out[key])) continue;
+    const nk = normalizeKeyForMatch(key);
+    const isSessionProjectPath =
+      nk.includes("projectpath") ||
+      nk.includes("projectroot") ||
+      nk.includes("project_path") ||
+      nk.includes("project_root");
+    if (nk.includes("preset") && presetHint) {
+      out[key] = presetHint;
+      continue;
+    }
+    if (!isSessionProjectPath && (nk.includes("output") || nk.includes("destination") || nk.includes("exportpath")) && pathHint) {
+      out[key] = pathHint.replace(/^res:\/\//i, "");
+      continue;
+    }
+    const enumVals = Array.isArray(properties?.[key]?.enum) ? properties[key].enum.map((x) => safeString(x).trim()).filter(Boolean) : [];
+    if (enumVals.length > 0) {
+      const found = enumVals.find((v) => new RegExp(`\\b${v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(request));
+      if (found) out[key] = found;
+    }
+  }
+  return out;
+}
+
 function normalizeRefToken(token) {
   return safeString(token).trim().replace(/^["'`]+|["'`]+$/g, "").replace(/^res:\/\//i, "").replace(/^\/+/, "").replace(/\\/g, "/");
 }
@@ -393,14 +514,20 @@ function inferExpectedExtFromArgKey(argKey) {
   return null;
 }
 
-function valueAt(obj, key) {
-  if (!isPlainObject(obj)) return null;
-  return obj[key];
+function hasNonEmpty(args, key) {
+  const v = valueAtFlexible(args, key);
+  return v != null && safeString(v).trim() !== "";
 }
 
-function hasNonEmpty(args, key) {
-  const v = valueAt(args, key);
-  return v != null && safeString(v).trim() !== "";
+function valueAtFlexible(args, key) {
+  if (!isPlainObject(args)) return null;
+  if (Object.prototype.hasOwnProperty.call(args, key)) return args[key];
+  const wanted = normalizeKeyForMatch(key);
+  if (!wanted) return null;
+  for (const [k, v] of Object.entries(args)) {
+    if (normalizeKeyForMatch(k) === wanted) return v;
+  }
+  return null;
 }
 
 function compactSemanticSummaryForVerify(sessionContext) {
@@ -561,6 +688,7 @@ export class ToolPlanner {
         userRequest: request,
         sessionContext: sessionCtx,
         plannerCatalog: cat,
+        tools,
       });
       const semanticSummary = compactSemanticSummaryForVerify(promptContext.sessionContext);
       if (this._debug) {
@@ -600,44 +728,54 @@ export class ToolPlanner {
         sessionContext: promptContext.sessionContext,
         workflowState: isPlainObject(promptContext.sessionContext?.workflowState) ? promptContext.sessionContext.workflowState : {},
         plannerCatalog: cat,
+        promptToolInventory: promptContext.promptToolInventory,
         tools,
       });
       if (!critiqued.ok) {
         lastError = critiqued.error || "Planner critic rejected candidate.";
         continue;
       }
+      const postCriticPlan = this._guardAgainstCriticRegression({
+        candidatePlan: cleaned,
+        critiquedPlan: critiqued.plan,
+        tools,
+        sessionContext: promptContext.sessionContext,
+      });
       if (this._debug) {
         console.log("[VERIFY][planner-final-plan]", {
-          status: safeString(critiqued?.plan?.status).trim() || null,
-          tools: Array.isArray(critiqued?.plan?.tools)
-            ? critiqued.plan.tools.map((t) => ({ name: safeString(t?.name).trim() || null, args: isPlainObject(t?.args) ? t.args : {} }))
+          status: safeString(postCriticPlan?.status).trim() || null,
+          tools: Array.isArray(postCriticPlan?.tools)
+            ? postCriticPlan.tools.map((t) => ({ name: safeString(t?.name).trim() || null, args: isPlainObject(t?.args) ? t.args : {} }))
             : [],
-          step: isPlainObject(critiqued?.plan?.step)
+          step: isPlainObject(postCriticPlan?.step)
             ? {
-              tool: safeString(critiqued.plan.step.tool).trim() || null,
-              args: isPlainObject(critiqued.plan.step.args) ? critiqued.plan.step.args : {},
-              reason: safeString(critiqued.plan.step.reason).trim() || null,
+              tool: safeString(postCriticPlan.step.tool).trim() || null,
+              args: isPlainObject(postCriticPlan.step.args) ? postCriticPlan.step.args : {},
+              reason: safeString(postCriticPlan.step.reason).trim() || null,
             }
             : null,
-          missingArgs: Array.isArray(critiqued?.plan?.missingArgs) ? critiqued.plan.missingArgs : [],
-          ambiguities: Array.isArray(critiqued?.plan?.ambiguities) ? critiqued.plan.ambiguities : [],
-          reason: safeString(critiqued?.plan?.reason).trim() || null,
-          confidence: normalizeConfidence(critiqued?.plan?.confidence, 0.5),
+          missingArgs: Array.isArray(postCriticPlan?.missingArgs) ? postCriticPlan.missingArgs : [],
+          ambiguities: Array.isArray(postCriticPlan?.ambiguities) ? postCriticPlan.ambiguities : [],
+          reason: safeString(postCriticPlan?.reason).trim() || null,
+          confidence: normalizeConfidence(postCriticPlan?.confidence, 0.5),
         });
       }
       
       const isFinalAttempt = i === attemptCatalogs.length - 1;
-      const shouldEscalate = !isFinalAttempt && this._shouldEscalateAttempt(critiqued.plan);
+      const shouldEscalate = !isFinalAttempt && this._shouldEscalateAttempt(postCriticPlan);
       if (shouldEscalate) continue;
-      return critiqued.plan;
+      return postCriticPlan;
     }
     return this._unsupported(lastError || "Planner could not produce a valid plan.");
   }
 
-  async getPromptContext({ userRequest, sessionContext = null, plannerCatalog = [] } = {}) {
+  async getPromptContext({ userRequest, sessionContext = null, plannerCatalog = [], tools = [] } = {}) {
     const promptTemplate = await this._readPromptTemplate();
-    const compactTools = plannerCatalog
-      .map(normalizePlannerEntry)
+    const compactTools = plannerCatalog.map(normalizePlannerEntry).filter(Boolean).slice(0, 200);
+    const candidateNames = new Set(compactTools.map((x) => safeString(x?.name).trim()).filter(Boolean));
+    const fullToolInventory = (Array.isArray(tools) ? tools : [])
+      .filter((t) => candidateNames.has(safeString(t?.name).trim()))
+      .map((t) => compactToolSchemaForPrompt(t))
       .filter(Boolean)
       .slice(0, 200);
 
@@ -651,12 +789,13 @@ export class ToolPlanner {
       .replace("{USER_REQUEST}", JSON.stringify(safeString(userRequest).trim()))
       .replace("{SESSION_CONTEXT_JSON}", JSON.stringify(sessionCtx, null, 2))
       .replace("{WORKFLOW_STATE_JSON}", JSON.stringify(isPlainObject(sessionCtx.workflowState) ? sessionCtx.workflowState : {}, null, 2))
-      .replace("{TOOL_INVENTORY_JSON}", JSON.stringify(compactTools, null, 2));
+      .replace("{TOOL_INVENTORY_JSON}", JSON.stringify(fullToolInventory, null, 2));
 
     return {
       prompt,
-      toolCount: compactTools.length,
+      toolCount: fullToolInventory.length,
       sessionContext: sessionCtx,
+      promptToolInventory: fullToolInventory,
     };
   }
 
@@ -776,9 +915,13 @@ export class ToolPlanner {
       return { ok: false, error: "unsupported status requires reason." };
     }
 
+    const canonicalTools =
+      status === "next_step"
+        ? [{ name: stepTool, args: stepArgs }]
+        : normalizedTools;
     const plan = {
       status,
-      tools: status === "ready" || status === "missing_args" ? normalizedTools : [],
+      tools: status === "ready" || status === "missing_args" || status === "next_step" ? canonicalTools : [],
       step: status === "next_step" ? { tool: stepTool, args: stepArgs, reason: safeString(parsed?.step?.reason).trim() || null } : null,
       missingArgs: status === "missing_args" || status === "needs_input" ? missingArgs : [],
       ambiguities: status === "ambiguous" || status === "needs_input" ? ambiguities : [],
@@ -787,21 +930,48 @@ export class ToolPlanner {
     };
     if (status === "ready" || status === "missing_args" || status === "next_step") {
       const reconciled = this._reconcilePlannerMissingArgs(plan, tools, sessionContext);
-      const intentAlignment = this._enforcePrimaryIntentAlignment({
+      const arbiterPlan = this._arbiterRealignPrimaryStep({
         plan: reconciled,
         tools,
         userRequest,
       });
-      if (!intentAlignment.ok) return intentAlignment;
       const explicitArgCheck = this._enforceExplicitUserArgs({
-        plan: reconciled,
+        plan: arbiterPlan,
         tools,
         userRequest,
       });
       if (!explicitArgCheck.ok) return explicitArgCheck;
-      return { ok: true, plan: this._attachPlannerV2Metadata(reconciled, tools) };
+      const reconciledAfterArbiter = this._reconcilePlannerMissingArgs(arbiterPlan, tools, sessionContext);
+      return { ok: true, plan: this._attachPlannerV2Metadata(reconciledAfterArbiter, tools) };
+    }
+    if (status === "unsupported") {
+      const unsupportedClaimCheck = this._rejectFalseUnsupportedCapability({
+        plan,
+        tools,
+      });
+      if (!unsupportedClaimCheck.ok) return unsupportedClaimCheck;
     }
     return { ok: true, plan };
+  }
+
+  _rejectFalseUnsupportedCapability({ plan = null, tools = [] } = {}) {
+    const p = isPlainObject(plan) ? plan : {};
+    const reason = safeString(p.reason).trim();
+    const claimedArg = extractUnsupportedMissingArgClaim(reason);
+    if (!claimedArg) return { ok: true };
+    const claimNorm = normalizeKeyForMatch(claimedArg);
+    for (const tool of Array.isArray(tools) ? tools : []) {
+      const schema = isPlainObject(tool?.inputSchema) ? tool.inputSchema : {};
+      const props = isPlainObject(schema?.properties) ? Object.keys(schema.properties) : [];
+      const hasArg = props.some((k) => normalizeKeyForMatch(k) === claimNorm);
+      if (hasArg) {
+        return {
+          ok: false,
+          error: `Unsupported capability claim conflicts with live schema: ${safeString(tool?.name).trim()} supports ${claimedArg}.`,
+        };
+      }
+    }
+    return { ok: true };
   }
 
   _attachPlannerV2Metadata(plan, tools) {
@@ -819,6 +989,43 @@ export class ToolPlanner {
         steps: v2Steps,
       },
     };
+  }
+
+  _isExecutablePlannerStep(plan) {
+    const p = isPlainObject(plan) ? plan : {};
+    const status = safeString(p.status).trim();
+    if (!["ready", "next_step"].includes(status)) return false;
+    const entries = status === "next_step"
+      ? [{ name: safeString(p?.step?.tool).trim(), args: isPlainObject(p?.step?.args) ? p.step.args : {} }]
+      : (Array.isArray(p.tools) ? p.tools : []);
+    if (entries.length < 1) return false;
+    return entries.every((entry) => {
+      const name = safeString(entry?.name).trim();
+      const args = isPlainObject(entry?.args) ? entry.args : {};
+      return Boolean(name) && Object.keys(args).length > 0;
+    });
+  }
+
+  _guardAgainstCriticRegression({ candidatePlan = null, critiquedPlan = null, tools = [], sessionContext = null } = {}) {
+    const candidate = isPlainObject(candidatePlan) ? candidatePlan : {};
+    const critiqued = isPlainObject(critiquedPlan) ? critiquedPlan : {};
+    const candidateReconciled = this._reconcilePlannerMissingArgs(candidate, tools, sessionContext);
+    const critiquedReconciled = this._reconcilePlannerMissingArgs(critiqued, tools, sessionContext);
+    const candidateExecutable = this._isExecutablePlannerStep(candidateReconciled);
+    const critiquedStatus = safeString(critiquedReconciled?.status).trim();
+    const critiquedDegraded = ["missing_args", "needs_input", "ambiguous", "unsupported"].includes(critiquedStatus);
+    if (candidateExecutable && critiquedDegraded) {
+      if (this._debug) {
+        console.log("[VERIFY][planner-critic-regression-guard]", {
+          candidateStatus: safeString(candidateReconciled?.status).trim() || null,
+          critiquedStatus: critiquedStatus || null,
+          critiquedMissingArgs: Array.isArray(critiquedReconciled?.missingArgs) ? critiquedReconciled.missingArgs : [],
+          critiquedReason: safeString(critiquedReconciled?.reason).trim() || null,
+        });
+      }
+      return candidateReconciled;
+    }
+    return critiquedReconciled;
   }
 
   _enforceExplicitUserArgs({ plan = null, tools = [], userRequest = "" } = {}) {
@@ -847,24 +1054,52 @@ export class ToolPlanner {
     return { ok: true };
   }
 
-  _enforcePrimaryIntentAlignment({ plan = null, tools = [], userRequest = "" } = {}) {
+  _arbiterRealignPrimaryStep({ plan = null, tools = [], userRequest = "" } = {}) {
     const p = isPlainObject(plan) ? plan : {};
     const status = safeString(p.status).trim();
-    if (status !== "next_step") return { ok: true };
-    if (hasSequencingHint(userRequest)) return { ok: true };
+    if (status !== "next_step") return p;
+    if (hasSequencingHint(userRequest)) return p;
     const primaryVerb = findPrimaryRequestVerb(userRequest);
-    if (!primaryVerb) return { ok: true };
+    if (!primaryVerb) return p;
     const stepTool = safeString(p?.step?.tool).trim();
-    if (!stepTool) return { ok: true };
-    const inventoryHasVerbTool = (Array.isArray(tools) ? tools : []).some((t) =>
-      toolNameSupportsVerb(safeString(t?.name).trim(), primaryVerb)
-    );
-    if (!inventoryHasVerbTool) return { ok: true };
-    if (toolNameSupportsVerb(stepTool, primaryVerb)) return { ok: true };
-    return {
-      ok: false,
-      error: `Planner selected non-primary step "${stepTool}" while request primary intent is "${primaryVerb}".`,
+    if (!stepTool) return p;
+    if (toolNameSupportsVerb(stepTool, primaryVerb)) return p;
+    const candidates = (Array.isArray(tools) ? tools : [])
+      .filter((t) => toolNameSupportsVerb(safeString(t?.name).trim(), primaryVerb))
+      .map((t) => ({
+        tool: t,
+        score: scoreToolForRequest(safeString(t?.name).trim(), userRequest, isPlainObject(t?.inputSchema) ? t.inputSchema : {}),
+      }))
+      .sort((a, b) => b.score - a.score);
+    const best = candidates[0]?.tool ?? null;
+    if (!best) return p;
+    const bestName = safeString(best?.name).trim();
+    const bestSchema = isPlainObject(best?.inputSchema) ? best.inputSchema : {};
+    const originalArgs = isPlainObject(p?.step?.args) ? p.step.args : {};
+    const remappedArgs = fillArgsFromRequestBySchema({
+      request: userRequest,
+      schema: bestSchema,
+      args: originalArgs,
+    });
+    const adjusted = {
+      ...p,
+      step: {
+        ...(isPlainObject(p.step) ? p.step : {}),
+        tool: bestName,
+        args: remappedArgs,
+        reason: safeString(p?.step?.reason).trim() || `Arbiter realigned step to primary intent "${primaryVerb}".`,
+      },
+      tools: [{ name: bestName, args: remappedArgs }],
     };
+    if (this._debug) {
+      console.log("[VERIFY][planner-arbiter-realign]", {
+        primaryVerb,
+        originalTool: stepTool,
+        selectedTool: bestName,
+        remappedArgs,
+      });
+    }
+    return adjusted;
   }
 
   _hasSessionProjectPath(sessionContext) {
@@ -1084,14 +1319,16 @@ export class ToolPlanner {
     }
   }
 
-  async _runCriticPass({ candidatePlan = null, userRequest = "", sessionContext = {}, workflowState = {}, plannerCatalog = [], tools = [] } = {}) {
+  async _runCriticPass({ candidatePlan = null, userRequest = "", sessionContext = {}, workflowState = {}, plannerCatalog = [], promptToolInventory = [], tools = [] } = {}) {
     const candidate = isPlainObject(candidatePlan) ? candidatePlan : null;
     if (!candidate) return { ok: false, error: "Planner critic requires candidate plan." };
     const prompt = buildCriticPrompt({
       userRequest,
       sessionContext,
       workflowState,
-      toolInventory: Array.isArray(plannerCatalog) ? plannerCatalog : [],
+      toolInventory: Array.isArray(promptToolInventory) && promptToolInventory.length > 0
+        ? promptToolInventory
+        : (Array.isArray(plannerCatalog) ? plannerCatalog : []),
       candidatePlan: candidate,
     });
     const criticRaw = await this._runModel(prompt);

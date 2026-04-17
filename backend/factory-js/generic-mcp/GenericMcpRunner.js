@@ -21,9 +21,7 @@ import { ArgumentResolver } from "./ArgumentResolver.js";
 import { Executor } from "./Executor.js";
 import { ResultPresenter } from "./ResultPresenter.js";
 import { LiveModelClient } from "./LiveModelClient.js";
-import { ProjectFileIndex } from "./ProjectFileIndex.js";
-import { ResourceResolver } from "./ResourceResolver.js";
-import { NodeResolver } from "./NodeResolver.js";
+import { SessionGraphStore } from "./SessionGraphStore.js";
 import { ArtifactRegistry } from "./ArtifactRegistry.js";
 import {
   buildRuntimeState,
@@ -157,33 +155,15 @@ function semanticResolvedArgCandidates(field) {
 
 function extractFeatureTriggerInfo(userRequest, priorWorkflow = null) {
   const raw = safeString(userRequest);
-  const tscnRegex = /\btscn\s+edit\b\s*:?/i;
-  const scriptValidationRegex = /\bscript\s+valid\?\s*:?/i;
   const textEditFallbackRegex = /\b(?:text\s*[- ]?\s*edit(?:\s+fallback|\s+mode)?|fallback\s+text\s*[- ]?\s*edit)\b\s*:?/i;
-  const promptHadTscnTrigger = tscnRegex.test(raw);
-  const promptHadScriptValidationTrigger = scriptValidationRegex.test(raw);
   const promptHadTextEditFallbackTrigger = textEditFallbackRegex.test(raw);
-  const priorTscnEnabled = Boolean(priorWorkflow?.featureFlags?.tscnEdit?.enabled);
-  const priorScriptValidationEnabled = Boolean(priorWorkflow?.featureFlags?.scriptValidation?.enabled);
   const priorTextEditFallbackEnabled = Boolean(priorWorkflow?.featureFlags?.textEditFallback?.enabled);
-  const tscnEnabled = promptHadTscnTrigger || priorTscnEnabled;
-  const scriptValidationEnabled = promptHadScriptValidationTrigger || priorScriptValidationEnabled;
   const textEditFallbackEnabled = promptHadTextEditFallbackTrigger || priorTextEditFallbackEnabled;
   const sanitizedRequest = raw
-    .replace(tscnRegex, " ")
-    .replace(scriptValidationRegex, " ")
     .replace(textEditFallbackRegex, " ")
     .replace(/\s{2,}/g, " ")
     .trim();
   return {
-    tscnEdit: {
-      enabled: tscnEnabled,
-      promptHadTrigger: promptHadTscnTrigger,
-    },
-    scriptValidation: {
-      enabled: scriptValidationEnabled,
-      promptHadTrigger: promptHadScriptValidationTrigger,
-    },
     textEditFallback: {
       enabled: textEditFallbackEnabled,
       promptHadTrigger: promptHadTextEditFallbackTrigger,
@@ -200,16 +180,12 @@ export class GenericMcpRunner {
     argumentResolver = null,
     executor = null,
     resultPresenter = null,
-    /** When omitted, resolved from resourceResolver / injected ArgumentResolver, or a new index is created. */
-    fileIndex = null,
-    /** When omitted, resolved from injected ArgumentResolver or created with shared fileIndex. */
-    resourceResolver = null,
+    sessionGraphStore = null,
     modelClient = null,
     mcpConfig = null,
     pageSize = 100,
     maxSteps = 6,
     maxQueuedTasks = 12,
-    disableContentSynthesis = null,
     hooks = null,
     debug = false,
   } = {}) {
@@ -220,8 +196,7 @@ export class GenericMcpRunner {
       argumentResolver,
       executor,
       resultPresenter,
-      fileIndex,
-      resourceResolver,
+      sessionGraphStore,
     };
     this._modelClient = modelClient ?? null;
     this._mcpConfig = mcpConfig ?? null;
@@ -230,13 +205,6 @@ export class GenericMcpRunner {
     this._maxQueuedTasks = Number.isFinite(Number(maxQueuedTasks))
       ? Math.max(1, Math.min(50, Math.floor(Number(maxQueuedTasks))))
       : 12;
-    const envDisableContentSynthesis = safeString(process.env.GENERIC_MCP_DISABLE_CONTENT_SYNTHESIS).trim().toLowerCase();
-    this._disableContentSynthesis =
-      typeof disableContentSynthesis === "boolean"
-        ? disableContentSynthesis
-        : envDisableContentSynthesis
-          ? envDisableContentSynthesis !== "false"
-          : true;
     this._debug =
       Boolean(debug) ||
       safeString(process.env.DEBUG_GENERIC_MCP_VERIFY).trim().toLowerCase() === "true";
@@ -249,11 +217,9 @@ export class GenericMcpRunner {
       argumentResolver: argumentResolver ?? null,
       executor: executor ?? null,
       resultPresenter: resultPresenter ?? null,
-      fileIndex: null,
-      resourceResolver: null,
-      nodeResolver: null,
       artifactRegistry: null,
       textEditFallback: null,
+      sessionGraphStore: null,
     };
   }
 
@@ -376,8 +342,8 @@ export class GenericMcpRunner {
       safeString(sessionStatus?.connectedProjectPath).trim() ||
       safeString(projectRoot).trim() ||
       null;
-    if (this._modules.fileIndex && activeProjectRoot) {
-      await this._modules.fileIndex.build(activeProjectRoot);
+    if (this._modules.sessionGraphStore && activeProjectRoot) {
+      await this._modules.sessionGraphStore.load(activeProjectRoot);
     }
 
     const providedSessionContext = isPlainObject(sessionContext) ? sessionContext : {};
@@ -411,19 +377,9 @@ export class GenericMcpRunner {
     const workflowState = this._initWorkflowState({
       userRequest: plannerRequest,
       resumeNeedsInput,
-      tscnEdit: featureTrigger.tscnEdit,
-      scriptValidation: featureTrigger.scriptValidation,
       textEditFallback: featureTrigger.textEditFallback,
     });
     if (this._debug) {
-      console.log("[VERIFY][tscn-edit-trigger]", {
-        enabled: Boolean(featureTrigger.tscnEdit?.enabled),
-        promptHadTrigger: Boolean(featureTrigger.tscnEdit?.promptHadTrigger),
-      });
-      console.log("[VERIFY][script-validation-trigger]", {
-        enabled: Boolean(featureTrigger.scriptValidation?.enabled),
-        promptHadTrigger: Boolean(featureTrigger.scriptValidation?.promptHadTrigger),
-      });
       console.log("[VERIFY][text-edit-fallback-trigger]", {
         enabled: Boolean(featureTrigger.textEditFallback?.enabled),
         promptHadTrigger: Boolean(featureTrigger.textEditFallback?.promptHadTrigger),
@@ -514,84 +470,8 @@ export class GenericMcpRunner {
       const decisionStatus = safeString(planning?.status).trim();
 
       if (decisionStatus === "done") {
-        const pendingTargetedEdits = Array.isArray(workflowState?.semanticState?.targetedEdits)
-          ? workflowState.semanticState.targetedEdits
-          : [];
-        if (pendingTargetedEdits.length > 0) {
-          workflowState.unmetPostconditions = [...new Set([
-            ...(Array.isArray(workflowState.unmetPostconditions) ? workflowState.unmetPostconditions : []),
-            "targetedEditsPending",
-          ])];
-          workflowState.doneWithoutPostconditionCount = Number(workflowState.doneWithoutPostconditionCount || 0) + 1;
-          if (workflowState.doneWithoutPostconditionCount >= 2) {
-            return this._buildRunResult({
-              ok: false,
-              status: "failed",
-              reason: `Partial completion: unresolved targeted edits remain (${pendingTargetedEdits.length}).`,
-              sessionStatus,
-              inventorySummary: { toolCount: inventory.toolCount, fetchedAt: inventory.fetchedAt },
-              planningResult: planning,
-              resolvedPlan: lastResolved,
-              executionResult: { ok: false, results: allStepResults, error: "targeted_edits_pending" },
-              presentation: `Stopped with partial completion. Unresolved targeted edits: ${pendingTargetedEdits.length}`,
-              workflowState,
-              runtimeState: this._runtimeWithWorkflow({
-                planningResult: planning,
-                resolvedPlan: lastResolved,
-                inventory,
-                workflowState,
-              }),
-            });
-          }
-          continue;
-        }
-        const effectState = this._refreshEffectState(workflowState);
-        if (this._isContentBearingWorkflow(workflowState) && !this._hasGeneratedOrCompiledContent(workflowState)) {
-          return this._buildRunResult({
-            ok: false,
-            status: "failed",
-            reason: "Partial completion: content intent exists but no generated/compiled content artifact was produced.",
-            sessionStatus,
-            inventorySummary: { toolCount: inventory.toolCount, fetchedAt: inventory.fetchedAt },
-            planningResult: planning,
-            resolvedPlan: lastResolved,
-            executionResult: { ok: false, results: allStepResults, error: "content_artifact_missing" },
-            presentation: "Stopped with partial completion: content intent exists but no generated implementation artifact was produced.",
-            workflowState,
-            runtimeState: this._runtimeWithWorkflow({
-              planningResult: planning,
-              resolvedPlan: lastResolved,
-              inventory,
-              workflowState,
-              }),
-          });
-        }
-        const remainingEffects = Array.isArray(effectState?.remainingEffects) ? effectState.remainingEffects : [];
-        if (remainingEffects.length > 0) {
-          workflowState.unmetPostconditions = remainingEffects;
-          workflowState.doneWithoutPostconditionCount = Number(workflowState.doneWithoutPostconditionCount || 0) + 1;
-          if (workflowState.doneWithoutPostconditionCount >= 2) {
-            return this._buildRunResult({
-              ok: false,
-              status: "failed",
-              reason: `Partial completion: unmet expected effects remain (${remainingEffects.join(", ")}).`,
-              sessionStatus,
-              inventorySummary: { toolCount: inventory.toolCount, fetchedAt: inventory.fetchedAt },
-              planningResult: planning,
-              resolvedPlan: lastResolved,
-              executionResult: { ok: false, results: allStepResults, error: "postcondition_unmet" },
-              presentation: `Stopped with partial completion. Unmet expected effects: ${remainingEffects.join(", ")}`,
-              workflowState,
-              runtimeState: this._runtimeWithWorkflow({
-                planningResult: planning,
-                resolvedPlan: lastResolved,
-                inventory,
-                workflowState,
-              }),
-            });
-          }
-          continue;
-        }
+        // MCP-thin completion policy:
+        // planner "done" ends the run without inferred-effect gating.
         workflowState.doneWithoutPostconditionCount = 0;
         const executionResult = {
           ok: true,
@@ -693,6 +573,14 @@ export class GenericMcpRunner {
             }),
           });
         }
+        const plannerMissing = Array.isArray(planning?.missingArgs)
+          ? planning.missingArgs.map((x) => safeString(x).trim()).filter(Boolean)
+          : [];
+        const plannerReason = safeString(planning?.reason).trim() || decisionStatus || "planner could not produce executable step";
+        const plannerPresentation =
+          decisionStatus === "missing_args" || decisionStatus === "needs_input"
+            ? `Failed: missing_args${plannerMissing.length > 0 ? ` (${plannerMissing.join(", ")})` : ""}`
+            : `Failed: ${plannerReason}`;
         return this._buildRunResult({
           ok: false,
           status: "failed",
@@ -708,7 +596,7 @@ export class GenericMcpRunner {
             reason: safeString(planning?.reason).trim() || null,
           },
           executionResult: { ok: false, results: allStepResults, error: "planner_not_executable" },
-          presentation: `Failed: ${safeString(planning?.reason).trim() || decisionStatus || "planner could not produce executable step"}`,
+          presentation: plannerPresentation,
           workflowState,
           runtimeState: this._runtimeWithWorkflow({
             planningResult: planning,
@@ -1126,7 +1014,15 @@ export class GenericMcpRunner {
   }
 
   _buildTaskQueueFromRequest(request) {
-    const tasks = this._splitUserRequestIntoTasks(request);
+    const rawTasks = this._splitUserRequestIntoTasks(request);
+    const tasks = [];
+    const seen = new Set();
+    for (const task of rawTasks) {
+      const normalized = safeString(task).trim().replace(/\s+/g, " ").toLowerCase();
+      if (!normalized || seen.has(normalized)) continue;
+      seen.add(normalized);
+      tasks.push(safeString(task).trim());
+    }
     if (tasks.length < 1) {
       return { ok: false, error: "No executable task found in user request.", isQueueExecution: false, queueState: null };
     }
@@ -1491,39 +1387,16 @@ export class GenericMcpRunner {
           modelClient,
         });
     }
-    if (!this._modules.fileIndex) {
-      const pFi = this._provided.fileIndex;
-      const rr = this._provided.resourceResolver;
-      const fromRr = rr && typeof rr.getFileIndex === "function" ? rr.getFileIndex() : null;
-      const ar0 = this._provided.argumentResolver;
-      const fromAr = ar0 && typeof ar0.getFileIndex === "function" ? ar0.getFileIndex() : null;
-      this._modules.fileIndex = pFi ?? fromRr ?? fromAr ?? new ProjectFileIndex({ debug: this._debug });
-    }
-    if (!this._modules.resourceResolver) {
-      const rrProvided = this._provided.resourceResolver;
-      const ar1 = this._provided.argumentResolver;
-      const fromArFr = ar1 && typeof ar1.getFileResolver === "function" ? ar1.getFileResolver() : null;
-      this._modules.resourceResolver =
-        rrProvided ??
-        fromArFr ??
-        new ResourceResolver({
-          fileIndex: this._modules.fileIndex,
-          debug: this._debug,
-        });
-    }
-    if (!this._modules.nodeResolver) {
-      this._modules.nodeResolver = new NodeResolver({
-        sessionManager: this._modules.sessionManager,
-        inventory: this._modules.toolInventory,
-      });
+    if (!this._modules.sessionGraphStore) {
+      this._modules.sessionGraphStore =
+        this._provided.sessionGraphStore ??
+        new SessionGraphStore({ debug: this._debug });
     }
     if (!this._modules.argumentResolver) {
       this._modules.argumentResolver =
         this._provided.argumentResolver ??
         new ArgumentResolver({
           sessionManager: this._modules.sessionManager,
-          fileResolver: this._modules.resourceResolver,
-          nodeResolver: this._modules.nodeResolver,
           toolInventory: this._modules.toolInventory,
           debug: this._debug,
         });
@@ -1534,7 +1407,7 @@ export class GenericMcpRunner {
         new Executor({
           sessionManager: this._modules.sessionManager,
           toolInventory: this._modules.toolInventory,
-          fileIndex: this._modules.fileIndex,
+          sessionGraphStore: this._modules.sessionGraphStore,
           debug: this._debug,
         });
     }
@@ -1611,27 +1484,14 @@ export class GenericMcpRunner {
       .replace(/\\/g, "/");
     if (!rel || !/\.(gd|tscn)$/i.test(rel)) return null;
     if (rel.includes("/")) return rel;
-    const fileIndex = this._modules.fileIndex;
     const root = safeString(projectRoot).trim();
-    if (!fileIndex || !root) return rel;
-    const matches = [];
-    const pushMatches = (list) => {
-      for (const item of Array.isArray(list) ? list : []) {
-        const candidate = safeString(item?.relative_path).trim().replace(/\\/g, "/");
-        if (!candidate || !/\.(gd|tscn)$/i.test(candidate)) continue;
-        if (candidate.toLowerCase().endsWith(rel.toLowerCase())) matches.push(candidate);
-      }
-    };
-    pushMatches(fileIndex.findByRelativePath(rel));
-    pushMatches(fileIndex.findByFilename(rel));
-    const stem = rel.replace(/\.(gd|tscn)$/i, "");
-    if (stem) pushMatches(fileIndex.findByStem(stem));
-    const deduped = [...new Set(matches)];
-    if (deduped.length === 1) return deduped[0];
-    const ext = rel.toLowerCase().endsWith(".tscn") ? ".tscn" : ".gd";
-    const preferredDir = ext === ".tscn" ? "/scenes/" : "/scripts/";
-    const preferred = deduped.find((p) => p.toLowerCase().includes(preferredDir));
-    return preferred || deduped[0] || rel;
+    const graph = this._modules.sessionGraphStore;
+    if (!graph || !root) return rel;
+    if (rel.toLowerCase().endsWith(".tscn")) {
+      const scenePath = graph.resolveSceneRef(rel);
+      if (scenePath) return scenePath;
+    }
+    return rel;
   }
 
   async _tryTextEditFallback({
@@ -1931,7 +1791,7 @@ export class GenericMcpRunner {
     };
   }
 
-  _initWorkflowState({ userRequest, resumeNeedsInput, tscnEdit = null, scriptValidation = null, textEditFallback = null }) {
+  _initWorkflowState({ userRequest, resumeNeedsInput, textEditFallback = null }) {
     const prior = isPlainObject(resumeNeedsInput?.workflow) ? resumeNeedsInput.workflow : null;
     const priorIntent = isPlainObject(prior?.semanticIntent) ? prior.semanticIntent : null;
     const semanticIntent = this._sanitizeSemanticIntent({
@@ -1970,20 +1830,6 @@ export class GenericMcpRunner {
       featureFlags: isPlainObject(prior?.featureFlags) ? { ...prior.featureFlags } : {},
     };
     const envTextEditFallbackEnabled = safeString(process.env.GENERIC_MCP_TEXT_EDIT_FALLBACK).trim().toLowerCase() === "true";
-    workflowState.featureFlags.tscnEdit = {
-      enabled: Boolean(
-        tscnEdit?.enabled ||
-        prior?.featureFlags?.tscnEdit?.enabled
-      ),
-      promptHadTrigger: Boolean(tscnEdit?.promptHadTrigger ?? false),
-    };
-    workflowState.featureFlags.scriptValidation = {
-      enabled: Boolean(
-        scriptValidation?.enabled ||
-        prior?.featureFlags?.scriptValidation?.enabled
-      ),
-      promptHadTrigger: Boolean(scriptValidation?.promptHadTrigger ?? false),
-    };
     workflowState.featureFlags.textEditFallback = {
       enabled: Boolean(
         textEditFallback?.enabled ||
@@ -1993,10 +1839,6 @@ export class GenericMcpRunner {
       promptHadTrigger: Boolean(textEditFallback?.promptHadTrigger ?? false),
     };
     if (!isPlainObject(workflowState.semanticState.knownFacts)) workflowState.semanticState.knownFacts = {};
-    workflowState.semanticState.knownFacts.tscnEditEnabled = Boolean(workflowState.featureFlags?.tscnEdit?.enabled);
-    workflowState.semanticState.knownFacts.scriptValidationEnabled = Boolean(
-      workflowState.featureFlags?.scriptValidation?.enabled
-    );
     workflowState.semanticState.knownFacts.textEditFallbackEnabled = Boolean(
       workflowState.featureFlags?.textEditFallback?.enabled
     );
@@ -2305,7 +2147,9 @@ export class GenericMcpRunner {
     if (!(workflowState.stepSignatures instanceof Map)) workflowState.stepSignatures = new Map();
     const next = Number(workflowState.stepSignatures.get(signature) || 0) + 1;
     workflowState.stepSignatures.set(signature, next);
-    return next >= 3;
+    // Stop before a second execution of the exact same step signature.
+    // This keeps queue execution idempotent when planner loops on identical args.
+    return next >= 2;
   }
 
   async _refreshAndValidateExecutionTools({ toolInventory, resolvedPlan } = {}) {
@@ -2385,28 +2229,8 @@ export class GenericMcpRunner {
   }
 
   async _ensureGeneratedContentStage({ resolvedPlan, workflowState, sessionContext = null }) {
-    if (this._disableContentSynthesis) {
-      return { status: "disabled", reason: "content_synthesis_disabled" };
-    }
-    const rp = isPlainObject(resolvedPlan) ? resolvedPlan : {};
-    if (safeString(rp.status).trim() !== "ready") return;
-    const firstTool = rp?.tools?.[0] ?? null;
-    const toolName = safeString(firstTool?.name).trim();
-    if (!toolName) return;
-    const args = isPlainObject(firstTool?.args) ? firstTool.args : {};
-    const semanticState = isPlainObject(workflowState?.semanticState) ? workflowState.semanticState : {};
-    const semanticIntent = isPlainObject(workflowState?.semanticIntent) ? workflowState.semanticIntent : {};
-    const hasIntent = Boolean(
-      safeString(args?.contentIntent).trim() ||
-      safeString(args?.codeIntent).trim() ||
-      safeString(semanticState?.contentIntent).trim() ||
-      safeString(semanticState?.codeIntent).trim() ||
-      safeString(semanticIntent?.contentIntent).trim() ||
-      safeString(semanticIntent?.codeIntent).trim() ||
-      safeString(semanticIntent?.behaviorIntent).trim()
-    );
-    if (!hasIntent) return;
-
+    void resolvedPlan;
+    void workflowState;
     void sessionContext;
     return { status: "disabled", reason: "content_synthesis_disabled" };
   }
@@ -2422,61 +2246,9 @@ export class GenericMcpRunner {
     );
   }
 
-  _hasGeneratedOrCompiledContent(workflowState) {
-    const semanticState = isPlainObject(workflowState?.semanticState) ? workflowState.semanticState : {};
-    return Boolean(
-      safeString(semanticState?.generatedCode).trim() ||
-      safeString(semanticState?.generatedContent?.content).trim() ||
-      (isPlainObject(semanticState?.compiledPayload) && Object.keys(semanticState.compiledPayload).length > 0)
-    );
-  }
-
   async _ensureContentGenerationInvariant({ workflowState }) {
-    if (this._disableContentSynthesis) return { ok: true, reason: null };
-    if (!this._isContentBearingWorkflow(workflowState)) return { ok: true, reason: null };
-    if (this._hasGeneratedOrCompiledContent(workflowState)) return { ok: true, reason: null };
-    const semanticState = isPlainObject(workflowState?.semanticState) ? workflowState.semanticState : {};
-    const semanticIntent = isPlainObject(workflowState?.semanticIntent) ? workflowState.semanticIntent : {};
-    const hasSemanticContentIntent = Boolean(
-      safeString(semanticState?.contentIntent).trim() ||
-      safeString(semanticState?.codeIntent).trim() ||
-      safeString(semanticIntent?.contentIntent).trim() ||
-      safeString(semanticIntent?.codeIntent).trim() ||
-      safeString(semanticIntent?.behaviorIntent).trim()
-    );
-    if (!hasSemanticContentIntent) {
-      return {
-        ok: false,
-        kind: "needs_input",
-        field: "contentIntent",
-        reason: "I need the desired behavior/content to generate an implementation.",
-      };
-    }
-    const seedPlan = {
-      status: "ready",
-      tools: [{ name: "content-generation", args: seedArgsFromSemanticState({}, workflowState?.semanticState) }],
-    };
-    const generated = await this._ensureGeneratedContentStage({
-      resolvedPlan: seedPlan,
-      workflowState,
-      sessionContext: null,
-    });
-    if (safeString(generated?.status).trim() === "ready" && this._hasGeneratedOrCompiledContent(workflowState)) {
-      return { ok: true, reason: null };
-    }
-    const missingField = normalizeFieldName(toSemanticField(generated?.missingSemanticField || null));
-    if (missingField) {
-      return {
-        ok: false,
-        kind: "needs_input",
-        field: missingField,
-        reason: safeString(generated?.reason).trim() || "More semantic intent is needed to generate content.",
-      };
-    }
-    return {
-      ok: false,
-      reason: safeString(generated?.reason).trim() || "content_generation_required_but_not_available",
-    };
+    void workflowState;
+    return { ok: true, reason: null };
   }
 
   _updateSemanticIntentFromStep(workflowState, args) {

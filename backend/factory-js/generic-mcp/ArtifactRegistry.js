@@ -1,3 +1,15 @@
+/**
+ * ArtifactRegistry
+ * -----------------------------------------------------------------------------
+ * Lightweight in-memory registry of artifacts observed during execution.
+ *
+ * Why this exists:
+ * - runner/executor need a stable place to track created/modified files
+ * - fallback and presentation layers need normalized paths
+ *
+ * Scope is intentionally small: normalize, register, and query artifact records.
+ */
+
 function safeString(value) {
   return value == null ? "" : String(value);
 }
@@ -164,4 +176,3 @@ export class ArtifactRegistry {
     map.set(key, list);
   }
 }
-

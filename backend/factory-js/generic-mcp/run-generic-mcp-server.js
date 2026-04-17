@@ -1,4 +1,16 @@
 #!/usr/bin/env node
+/**
+ * run-generic-mcp-server
+ * -----------------------------------------------------------------------------
+ * Sidecar entrypoint for the thin Generic MCP runtime.
+ *
+ * Responsibilities:
+ * - load config + model clients
+ * - wire runtime modules
+ * - start HTTP API server
+ * - perform optional startup readiness warmup
+ */
+
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import dotenv from "dotenv";
@@ -11,9 +23,7 @@ import { Executor } from "./Executor.js";
 import { ResultPresenter } from "./ResultPresenter.js";
 import { GenericMcpRunner } from "./GenericMcpRunner.js";
 import { LiveModelClient } from "./LiveModelClient.js";
-import { ProjectFileIndex } from "./ProjectFileIndex.js";
-import { ResourceResolver } from "./ResourceResolver.js";
-import { NodeResolver } from "./NodeResolver.js";
+import { SessionGraphStore } from "./SessionGraphStore.js";
 import { McpConfigLoader } from "./McpConfigLoader.js";
 
 import { GenericMcpSessionStore } from "./api/GenericMcpSessionStore.js";
@@ -85,22 +95,18 @@ export async function createGenericMcpSidecarRuntime({ argv = [], env = process.
   });
 
   const toolInventory = new ToolInventory({ sessionManager });
-  const fileIndex = new ProjectFileIndex({ debug: config.debug });
-  const resourceResolver = new ResourceResolver({ fileIndex, debug: config.debug });
-  const nodeResolver = new NodeResolver({ sessionManager, inventory: toolInventory });
+  const sessionGraphStore = new SessionGraphStore({ debug: config.debug });
   const localToolPlanner = new ToolPlanner({ toolInventory, modelClient: localModelClient });
   const onlineToolPlanner = new ToolPlanner({ toolInventory, modelClient: onlineModelClient });
   const argumentResolver = new ArgumentResolver({
     sessionManager,
-    fileResolver: resourceResolver,
-    nodeResolver,
     toolInventory,
     debug: config.debug,
   });
   const executor = new Executor({
     sessionManager,
     toolInventory,
-    fileIndex,
+    sessionGraphStore,
     debug: config.debug,
   });
   const resultPresenter = new ResultPresenter({ debug: config.debug });
@@ -112,11 +118,9 @@ export async function createGenericMcpSidecarRuntime({ argv = [], env = process.
     argumentResolver,
     executor,
     resultPresenter,
-    fileIndex,
-    resourceResolver,
+    sessionGraphStore,
     modelClient: localModelClient,
     mcpConfig,
-    disableContentSynthesis: config.disableContentSynthesis,
     debug: config.debug,
   });
   const onlineRunner = new GenericMcpRunner({
@@ -126,11 +130,9 @@ export async function createGenericMcpSidecarRuntime({ argv = [], env = process.
     argumentResolver,
     executor,
     resultPresenter,
-    fileIndex,
-    resourceResolver,
+    sessionGraphStore,
     modelClient: onlineModelClient,
     mcpConfig,
-    disableContentSynthesis: config.disableContentSynthesis,
     debug: config.debug,
   });
 

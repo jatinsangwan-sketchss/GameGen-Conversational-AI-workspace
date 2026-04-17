@@ -1,3 +1,12 @@
+/**
+ * GenericMcpSessionStore
+ * -----------------------------------------------------------------------------
+ * In-memory session record store for HTTP API calls.
+ *
+ * Stores lightweight per-session metadata and last run state so `/run` calls
+ * can continue across requests.
+ */
+
 import { randomUUID } from "node:crypto";
 
 function safeString(value) {

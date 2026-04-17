@@ -57,6 +57,43 @@ function extractSchemaArgKeys(inputSchema = {}) {
   return [...new Set([...properties, ...required])];
 }
 
+function isNodeTargetArgKey(key = "") {
+  const nk = normalizeKey(key);
+  return nk.includes("nodepath") || nk.includes("noderef") || nk.includes("parentpath") || nk.includes("targetnode");
+}
+
+function isSceneArgKey(key = "") {
+  const nk = normalizeKey(key);
+  return nk.includes("scenepath") || nk.includes("sceneref");
+}
+
+function sceneStemFromArgs(args = {}) {
+  const scene = pickFirstText([args.scenePath, args.sceneRef, args.scene_path, args.scene]);
+  const normalized = normalizeRef(scene);
+  if (!normalized) return null;
+  const base = normalized.split("/").pop() || normalized;
+  return safeString(base).replace(/\.[a-z0-9_]+$/i, "").trim() || null;
+}
+
+function normalizeRootNodeToken(token = "", sceneStem = null) {
+  const raw = safeString(token).trim();
+  if (!raw) return "";
+  const unquoted = raw.replace(/^["'`]+|["'`]+$/g, "").trim();
+  const stripped = unquoted.replace(/^node\s+/i, "").trim();
+  const lower = stripped.toLowerCase();
+  if (lower === "." || lower === "root" || lower === "root node" || lower === "scene root" || lower === "scene_root") return ".";
+  if (sceneStem && lower === safeString(sceneStem).trim().toLowerCase()) return ".";
+  return stripped;
+}
+
+function looksBareNodeName(value = "") {
+  const v = safeString(value).trim();
+  if (!v) return false;
+  if (v === ".") return false;
+  if (v.includes("/")) return false;
+  return true;
+}
+
 function parseFailureText(rawResult) {
   if (rawResult == null) return "MCP tool reported failure.";
   if (typeof rawResult === "string") return rawResult;
@@ -113,6 +150,12 @@ function isRawResultOk(rawResult) {
   if (rawResult.ok === false) return false;
   if (rawResult.isError === true) return false;
   if (rawResult.error != null) return false;
+  return true;
+}
+
+function hasRequiredArgValue(value) {
+  if (value == null) return false;
+  if (typeof value === "string") return safeString(value).trim() !== "";
   return true;
 }
 function normalizeKey(value) {
@@ -255,19 +298,15 @@ export class Executor {
     sessionManager = null,
     toolInventory = null,
     fileIndex = null,
+    sessionGraphStore = null,
     debug = false,
-    enableGenericReadbackVerification = null,
   } = {}) {
     this._sessionManager = sessionManager ?? null;
     this._toolInventory = toolInventory ?? null;
     this._fileIndex = fileIndex ?? null;
+    this._sessionGraphStore = sessionGraphStore ?? null;
     this._artifactRegistry = new ArtifactRegistry();
     this._debug = Boolean(debug) || safeString(process.env.DEBUG_GENERIC_MCP_EXECUTOR).toLowerCase() === "true";
-    const envToggle = safeString(process.env.GENERIC_MCP_ENABLE_READBACK_VERIFICATION).trim().toLowerCase();
-    this._enableGenericReadbackVerification =
-      typeof enableGenericReadbackVerification === "boolean"
-        ? enableGenericReadbackVerification
-        : envToggle === "true";
   }
 
   async execute(resolvedPlan, { sessionStatus = null, inventory = null, artifactRegistry = null, workflowState = null } = {}) {
@@ -333,7 +372,11 @@ export class Executor {
       args: incomingArgs,
       schemaArgs,
     });
-    const callArgs = pruned.args;
+    const callArgs = this._canonicalizeArgsBySchema({
+      toolName,
+      args: pruned.args,
+      inputSchema: extractInputSchema(tool),
+    });
     if (this._debug && pruned.droppedKeys.length > 0) {
       console.log("[GenericMCP][Executor][DEBUG] pruned unknown args", {
         tool: toolName,
@@ -355,15 +398,9 @@ export class Executor {
 
     const payload = this.buildPayload({ toolName, args: callArgs });
     const expectsCreation = this._expectsArtifactCreation({ toolName, tool, args: callArgs, workflowState });
-    const genericReadbackPlan = this._enableGenericReadbackVerification
-      ? this._planGenericReadback({
-        toolName,
-        mutationArgs: callArgs,
-        inventory,
-      })
-      : { enabled: false, reason: "readback_verification_disabled" };
+    const genericReadbackPlan = { enabled: false, reason: "readback_verification_disabled" };
     let preMutationReadback = null;
-    if (this._enableGenericReadbackVerification && genericReadbackPlan?.enabled && !expectsCreation) {
+    if (genericReadbackPlan?.enabled && !expectsCreation) {
       preMutationReadback = await this._runGenericReadback({
         client,
         readTool: genericReadbackPlan.readTool,
@@ -480,13 +517,30 @@ export class Executor {
     }
     // console.log("[Executor] payload ", payload);
 
-    const rawResult = await this._callTool(client, { toolName, args: callArgs, payload });
+    let rawResult = await this._callTool(client, { toolName, args: callArgs, payload });
     let ok = isRawResultOk(rawResult);
     let error = ok ? null : this.extractFailureText(rawResult);
+    let effectiveCallArgs = { ...callArgs };
+    if (!ok) {
+      const retry = await this._retryOnceWithResolvedNodePath({
+        toolName,
+        args: effectiveCallArgs,
+        rawResult,
+        errorText: error,
+        client,
+        inventory,
+      });
+      if (retry.retried) {
+        effectiveCallArgs = retry.args;
+        ok = retry.ok;
+        error = retry.ok ? null : retry.error;
+        if (retry.rawResult != null) rawResult = retry.rawResult;
+      }
+    }
     if (!ok) {
       const recoverableCreateCollision = await this._isRecoverableCreateCollision({
         toolName,
-        args: callArgs,
+        args: effectiveCallArgs,
         rawResult,
         errorText: error,
         workflowState,
@@ -499,7 +553,7 @@ export class Executor {
     if (ok) {
       const creationVerification = await this._verifyArtifactFilesExist({
         toolName,
-        args: callArgs,
+        args: effectiveCallArgs,
         rawResult,
         workflowState,
       });
@@ -511,7 +565,7 @@ export class Executor {
     if (ok) {
       await this._normalizeCreatedGdscriptHeaders({
         toolName,
-        args: callArgs,
+        args: effectiveCallArgs,
         rawResult,
         workflowState,
       });
@@ -519,7 +573,7 @@ export class Executor {
     if (ok) {
       const attachVerification = await this._verifyAttachApplied({
         toolName,
-        args: callArgs,
+        args: effectiveCallArgs,
         rawResult,
         client,
         inventory,
@@ -531,10 +585,10 @@ export class Executor {
       }
     }
     let genericReadbackVerification = { ok: true };
-    if (ok && this._enableGenericReadbackVerification) {
+    if (ok && genericReadbackPlan?.enabled) {
       genericReadbackVerification = await this._verifyMutationViaReadback({
         toolName,
-        args: callArgs,
+        args: effectiveCallArgs,
         rawResult,
         client,
         inventory,
@@ -565,24 +619,24 @@ export class Executor {
         // eslint-disable-next-line no-console
         console.log("[GenericMCP][Executor] success", { tool: toolName });
       }
-      artifactRegistry?.registerFromExecution?.({ toolName, args: callArgs, rawResult });
-      await this._updateProjectIndexAfterMutation({ toolName, args: callArgs, rawResult });
+      artifactRegistry?.registerFromExecution?.({ toolName, args: effectiveCallArgs, rawResult });
+      await this._updateProjectIndexAfterMutation({ toolName, args: effectiveCallArgs, rawResult });
     }
 
     return {
       ok,
       tool: toolName,
-      args: callArgs,
+      args: effectiveCallArgs,
       rawResult,
       error,
       outcome: safeString(genericReadbackVerification?.outcome).trim() || null,
       outcomeReason: safeString(genericReadbackVerification?.reason).trim() || null,
       verification: {
         readback: {
-          enabled: Boolean(this._enableGenericReadbackVerification && genericReadbackPlan?.enabled),
+          enabled: Boolean(genericReadbackPlan?.enabled),
           readTool: safeString(genericReadbackPlan?.readTool?.name).trim() || null,
-          preOk: this._enableGenericReadbackVerification ? Boolean(preMutationReadback?.ok) : null,
-          postOk: this._enableGenericReadbackVerification ? Boolean(genericReadbackVerification?.ok) : null,
+          preOk: genericReadbackPlan?.enabled ? Boolean(preMutationReadback?.ok) : null,
+          postOk: genericReadbackPlan?.enabled ? Boolean(genericReadbackVerification?.ok) : null,
           readArgs: isPlainObject(genericReadbackPlan?.readArgs) ? genericReadbackPlan.readArgs : null,
           reason: safeString(genericReadbackPlan?.reason).trim() || null,
         },
@@ -638,6 +692,209 @@ export class Executor {
       });
     }
     return { args: out, droppedKeys };
+  }
+
+  _canonicalizeArgsBySchema({ toolName = "", args = {}, inputSchema = {} } = {}) {
+    const out = toArgs(args);
+    const schema = isPlainObject(inputSchema) ? inputSchema : {};
+    const required = normalizeRequired(schema);
+
+    // Tiny alias bridge by contract class (not tool-specific).
+    const aliasPairs = [
+      ["sceneRef", "scenePath"],
+      ["scriptRef", "scriptPath"],
+      ["fileRef", "filePath"],
+      ["resourceRef", "resourcePath"],
+      ["nodeRef", "nodePath"],
+      ["targetNodeRef", "targetNodePath"],
+    ];
+    for (const [fromKey, toKey] of aliasPairs) {
+      if (!required.includes(toKey)) continue;
+      if (hasRequiredArgValue(out[toKey])) continue;
+      if (!hasRequiredArgValue(out[fromKey])) continue;
+      out[toKey] = out[fromKey];
+    }
+
+    // Scene canonicalization via session graph source-of-truth when available.
+    const sceneKeys = Object.keys(out).filter((k) => isSceneArgKey(k));
+    const graph = this._sessionGraphStore;
+    for (const key of sceneKeys) {
+      const rawScene = safeString(out[key]).trim();
+      if (!rawScene) continue;
+      const resolved = graph && typeof graph.resolveSceneRef === "function"
+        ? graph.resolveSceneRef(rawScene)
+        : null;
+      if (resolved) out[key] = resolved;
+      else out[key] = normalizeRef(rawScene) || rawScene;
+    }
+
+    // Root canonicalization + session-graph node canonicalization for node target args.
+    const stem = sceneStemFromArgs(out);
+    const sceneContext = pickFirstText([out.scenePath, out.sceneRef, out.scene_path, out.scene]);
+    for (const key of Object.keys(out)) {
+      if (!isNodeTargetArgKey(key)) continue;
+      let normalized = normalizeRootNodeToken(out[key], stem);
+      const resolvedNode = graph && typeof graph.resolveNodeRef === "function"
+        ? graph.resolveNodeRef({ sceneRef: sceneContext, nodeRef: normalized })
+        : null;
+      if (resolvedNode) normalized = resolvedNode;
+      if (normalized) out[key] = normalized;
+    }
+
+    if (this._debug) {
+      console.log("[GenericMCP][Executor][DEBUG] canonicalized args", {
+        tool: safeString(toolName).trim() || null,
+        args: out,
+      });
+    }
+    return out;
+  }
+
+  _pickSceneNodeListTool(inventory) {
+    const tools = Array.isArray(inventory?.getInventory?.()?.tools)
+      ? inventory.getInventory().tools
+      : [];
+    const canonical = tools.find((t) => {
+      const key = safeString(t?.name).trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+      return key === "listscenenodes" || key === "listscenenode";
+    });
+    if (canonical) return canonical;
+    return tools.find((t) => {
+      const name = safeString(t?.name).trim().toLowerCase();
+      if (!(name.includes("scene") && name.includes("node") && name.includes("list"))) return false;
+      const schema = extractInputSchema(t);
+      const keys = [
+        ...(Array.isArray(schema?.required) ? schema.required : []),
+        ...(isPlainObject(schema?.properties) ? Object.keys(schema.properties) : []),
+      ].map((k) => normalizeKey(k));
+      return keys.some((k) => k.includes("scene")) && !keys.some((k) => k.includes("nodepath"));
+    }) || null;
+  }
+
+  _buildSceneNodeListArgs(tool = null, baseArgs = {}) {
+    const schema = extractInputSchema(tool);
+    const keys = [
+      ...(Array.isArray(schema?.required) ? schema.required : []),
+      ...(isPlainObject(schema?.properties) ? Object.keys(schema.properties) : []),
+    ];
+    const scene = pickFirstText([baseArgs.scenePath, baseArgs.sceneRef, baseArgs.scene_path, baseArgs.scene]);
+    const project = pickFirstText([baseArgs.projectPath, baseArgs.project_path, baseArgs.projectRoot, baseArgs.project_root]);
+    if (!scene) return null;
+    const out = { scenePath: scene, scene_path: scene, path: scene };
+    const sceneKey = keys.find((k) => normalizeKey(k).includes("scenepath")) || keys.find((k) => normalizeKey(k).includes("scene"));
+    if (sceneKey) out[sceneKey] = scene;
+    if (project) {
+      out.projectPath = project;
+      out.project_path = project;
+      out.projectRoot = project;
+      out.project_root = project;
+      const projectKey = keys.find((k) => normalizeKey(k).includes("projectpath") || normalizeKey(k).includes("projectroot"));
+      if (projectKey) out[projectKey] = project;
+    }
+    return out;
+  }
+
+  _extractSceneNodes(rawResult = null) {
+    const nodes = [];
+    const seen = new Set();
+    const payloads = [];
+    if (isPlainObject(rawResult)) payloads.push(rawResult);
+    if (Array.isArray(rawResult?.content)) {
+      for (const block of rawResult.content) {
+        const text = safeString(block?.text).trim();
+        if (!text) continue;
+        try {
+          payloads.push(JSON.parse(text));
+        } catch {
+          // ignore
+        }
+      }
+    }
+    const pushNode = (obj) => {
+      const name = safeString(obj?.name).trim();
+      const pathValue = safeString(obj?.path).trim();
+      if (!pathValue || seen.has(pathValue)) return;
+      seen.add(pathValue);
+      nodes.push({ name, path: pathValue });
+    };
+    const walk = (items) => {
+      for (const item of Array.isArray(items) ? items : []) {
+        if (!isPlainObject(item)) continue;
+        pushNode(item);
+        walk(item.children);
+      }
+    };
+    for (const payload of payloads) {
+      if (Array.isArray(payload?.nodes)) walk(payload.nodes);
+      if (isPlainObject(payload?.tree)) {
+        pushNode(payload.tree);
+        walk(payload.tree.children);
+      }
+      if (Array.isArray(payload)) walk(payload);
+    }
+    return nodes;
+  }
+
+  _resolveBareNodeFromTree(nodes = [], token = "") {
+    const target = safeString(token).trim();
+    if (!target || !looksBareNodeName(target)) return null;
+    const exact = nodes.filter((n) => safeString(n.name).trim() === target || safeString(n.path).trim() === target);
+    if (exact.length === 1) return exact[0].path;
+    if (exact.length > 1) return null;
+    const lower = target.toLowerCase();
+    const ci = nodes.filter((n) => safeString(n.name).trim().toLowerCase() === lower);
+    if (ci.length === 1) return ci[0].path;
+    if (ci.length > 1) return null;
+    const suffix = nodes.filter((n) => safeString(n.path).toLowerCase().endsWith(`/${lower}`) || safeString(n.path).toLowerCase() === lower);
+    if (suffix.length === 1) return suffix[0].path;
+    return null;
+  }
+
+  async _retryOnceWithResolvedNodePath({ toolName = "", args = {}, rawResult = null, errorText = "", client = null, inventory = null } = {}) {
+    const err = safeString(errorText).toLowerCase();
+    if (!/node not found|parent node not found|unknown node|cannot find node/.test(err)) {
+      return { retried: false, ok: false, error: errorText, args, rawResult: null };
+    }
+    const sceneArg = pickFirstText([args.scenePath, args.sceneRef, args.scene_path, args.scene]);
+    if (!sceneArg) return { retried: false, ok: false, error: errorText, args, rawResult: null };
+    const targetKeys = Object.keys(args).filter((k) => isNodeTargetArgKey(k) && looksBareNodeName(args[k]));
+    if (targetKeys.length < 1) return { retried: false, ok: false, error: errorText, args, rawResult: null };
+    const readTool = this._pickSceneNodeListTool(inventory);
+    if (!readTool) return { retried: false, ok: false, error: errorText, args, rawResult: null };
+    const readArgs = this._buildSceneNodeListArgs(readTool, args);
+    if (!readArgs) return { retried: false, ok: false, error: errorText, args, rawResult: null };
+    let readRaw = null;
+    try {
+      readRaw = await this._callTool(client, {
+        toolName: safeString(readTool?.name).trim(),
+        args: readArgs,
+        payload: this.buildPayload({ toolName: safeString(readTool?.name).trim(), args: readArgs }),
+      });
+    } catch {
+      return { retried: false, ok: false, error: errorText, args, rawResult: null };
+    }
+    if (!isRawResultOk(readRaw)) return { retried: false, ok: false, error: errorText, args, rawResult: null };
+    const nodes = this._extractSceneNodes(readRaw);
+    if (nodes.length < 1) return { retried: false, ok: false, error: errorText, args, rawResult: null };
+    const nextArgs = { ...args };
+    let changed = false;
+    for (const key of targetKeys) {
+      const resolved = this._resolveBareNodeFromTree(nodes, nextArgs[key]);
+      if (!resolved) continue;
+      nextArgs[key] = resolved;
+      changed = true;
+    }
+    if (!changed) return { retried: false, ok: false, error: errorText, args, rawResult: null };
+    const retryPayload = this.buildPayload({ toolName, args: nextArgs });
+    const retryRaw = await this._callTool(client, { toolName, args: nextArgs, payload: retryPayload });
+    const retryOk = isRawResultOk(retryRaw);
+    return {
+      retried: true,
+      ok: retryOk,
+      args: nextArgs,
+      error: retryOk ? null : this.extractFailureText(retryRaw),
+      rawResult: retryRaw,
+    };
   }
 
   async _resolveInventory(inventoryArg) {

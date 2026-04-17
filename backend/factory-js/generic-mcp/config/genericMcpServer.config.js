@@ -1,3 +1,11 @@
+/**
+ * genericMcpServer.config
+ * -----------------------------------------------------------------------------
+ * Central parser for sidecar CLI args + env vars.
+ *
+ * The output config object is the single source used by server bootstrap.
+ */
+
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -74,12 +82,6 @@ export function buildGenericMcpServerConfig({ argv = [], env = process.env } = {
   const debug =
     hasArg(argv, "--debug") ||
     parseBool(env.GENERIC_MCP_HTTP_DEBUG, false);
-  const disableContentSynthesis =
-    hasArg(argv, "--enable-content-synthesis")
-      ? false
-      : hasArg(argv, "--disable-content-synthesis")
-        ? true
-        : parseBool(env.GENERIC_MCP_DISABLE_CONTENT_SYNTHESIS, true);
   const autoInitializeOnStart =
     hasArg(argv, "--no-auto-init")
       ? false
@@ -106,7 +108,6 @@ export function buildGenericMcpServerConfig({ argv = [], env = process.env } = {
     maxBodyBytes,
     maxSessions,
     debug,
-    disableContentSynthesis,
     autoInitializeOnStart,
     clientModulePath: resolveClientModulePath({ argv, env }),
     defaultProjectPath: defaultProjectPathRaw ? path.resolve(defaultProjectPathRaw) : null,
@@ -167,8 +168,6 @@ export function genericMcpServerUsage() {
     "  --auto-init                    Auto-start MCP bridge readiness gate on sidecar boot (default: on)",
     "  --no-auto-init                 Disable startup auto-init gate",
     "  --debug                        Enable debug logging",
-    "  --enable-content-synthesis     Enable legacy content synthesis plumbing (default: disabled)",
-    "  --disable-content-synthesis    Disable content synthesis plumbing",
     "  --help                         Show help",
     "",
     "Routes:",

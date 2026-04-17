@@ -1,3 +1,15 @@
+/**
+ * GenericMcpHttpAdapter
+ * -----------------------------------------------------------------------------
+ * API adapter layer between HTTP routes and GenericMcpRunner.
+ *
+ * Responsibilities:
+ * - validate/normalize incoming payloads
+ * - resolve/create API session records
+ * - call local/online runner modes
+ * - return compact or full response envelopes
+ */
+
 import fs from "node:fs";
 import path from "node:path";
 

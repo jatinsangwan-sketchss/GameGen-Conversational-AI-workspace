@@ -1,3 +1,13 @@
+/**
+ * WorkflowCore
+ * -----------------------------------------------------------------------------
+ * Shared pure helpers for workflow-state derivation and semantic state updates.
+ *
+ * Design goal:
+ * - keep orchestration logic in GenericMcpRunner
+ * - keep reusable state/normalization logic here
+ */
+
 import { classifyToolArgs, semanticSlotForArg } from "./ArgRoleClassifier.js";
 
 function safeString(value) {

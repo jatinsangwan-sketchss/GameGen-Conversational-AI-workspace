@@ -1,3 +1,11 @@
+/**
+ * session-client utils
+ * -----------------------------------------------------------------------------
+ * Tiny helpers for safely accessing the active MCP client from SessionManager.
+ *
+ * Kept separate so inventory/executor can share one client-access contract.
+ */
+
 function safeString(value) {
   return value == null ? "" : String(value);
 }

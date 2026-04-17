@@ -1,3 +1,15 @@
+/**
+ * GenericMcpHttpServer
+ * -----------------------------------------------------------------------------
+ * Thin HTTP transport wrapper for the Generic MCP sidecar.
+ *
+ * Handles:
+ * - route dispatch
+ * - body parsing/size enforcement
+ * - content-type checks
+ * - error-to-http mapping
+ */
+
 import http from "node:http";
 
 function safeString(value) {

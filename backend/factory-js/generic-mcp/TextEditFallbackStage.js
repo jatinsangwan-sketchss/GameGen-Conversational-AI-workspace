@@ -1,3 +1,15 @@
+/**
+ * TextEditFallbackStage
+ * -----------------------------------------------------------------------------
+ * Safe fallback for `.gd` and `.tscn` edits when normal MCP tool execution
+ * cannot complete the request.
+ *
+ * Guarantees:
+ * - targeted edit ops only
+ * - transactional write + rollback on failure
+ * - post-edit validation before commit
+ */
+
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";

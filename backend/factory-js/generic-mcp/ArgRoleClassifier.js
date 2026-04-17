@@ -19,7 +19,10 @@ function isPlainObject(value) {
 }
 
 function normalizeKey(key) {
-  return safeString(key).toLowerCase().replace(/[^a-z0-9_]/g, "");
+  // Canonical key identity for schema/planner/resolver matching.
+  // We intentionally drop underscores so `node_ref`, `nodeRef`, and `node-ref`
+  // collapse to the same token family (`noderef`).
+  return safeString(key).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 function isSessionInjectedKey(nk) {
@@ -108,26 +111,71 @@ export function semanticArgCandidates(argName, semanticSlot) {
   if (arg) out.add(arg);
   if (slot) out.add(slot);
   const lowerSlot = slot.toLowerCase();
-  if (lowerSlot === "sceneref") out.add("sceneRef");
+  if (lowerSlot === "sceneref") {
+    out.add("sceneRef");
+    out.add("scenePath");
+    out.add("scene_path");
+  }
   if (lowerSlot === "noderef") {
     out.add("nodeRef");
     out.add("targetNodeRef");
     out.add("parentNodeRef");
+    out.add("nodePath");
+    out.add("targetNodePath");
+    out.add("parentPath");
+    out.add("node_path");
+    out.add("target_node_path");
+    out.add("parent_path");
   }
   if (lowerSlot === "targetnoderef") {
     out.add("targetNodeRef");
     out.add("nodeRef");
     out.add("parentNodeRef");
+    out.add("targetNodePath");
+    out.add("nodePath");
+    out.add("parentPath");
+    out.add("target_node_path");
+    out.add("node_path");
+    out.add("parent_path");
   }
   if (lowerSlot === "parentnoderef") {
     out.add("parentNodeRef");
     out.add("nodeRef");
     out.add("targetNodeRef");
+    out.add("parentPath");
+    out.add("nodePath");
+    out.add("targetNodePath");
+    out.add("parent_path");
+    out.add("node_path");
+    out.add("target_node_path");
   }
-  if (lowerSlot === "fileref") out.add("fileRef");
-  if (lowerSlot === "resourceref") out.add("resourceRef");
-  if (lowerSlot === "scriptref") out.add("scriptRef");
-  if (lowerSlot === "textureref") out.add("textureRef");
+  if (lowerSlot === "fileref") {
+    out.add("fileRef");
+    out.add("filePath");
+    out.add("path");
+    out.add("file_path");
+  }
+  if (lowerSlot === "resourceref") {
+    out.add("resourceRef");
+    out.add("resourcePath");
+    out.add("resource_path");
+  }
+  if (lowerSlot === "scriptref") {
+    out.add("scriptRef");
+    out.add("scriptPath");
+    out.add("script_path");
+  }
+  if (lowerSlot === "textureref") {
+    out.add("textureRef");
+    out.add("texturePath");
+    out.add("texture_path");
+  }
+  if (lowerSlot === "propertymap") {
+    out.add("propertyMap");
+    out.add("properties");
+    out.add("props");
+    out.add("property_map");
+  }
   if (lowerSlot === "name") out.add("requestedName");
   return [...out].filter(Boolean);
 }
